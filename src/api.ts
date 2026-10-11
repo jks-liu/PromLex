@@ -7,7 +7,10 @@ import type {
   PromptTemplate,
   Provider,
   ProviderModel,
-  LogsData,
+  LogKind,
+  LogPage,
+  SystemLogEntry,
+  AiConversationLog,
   TranslateRequest,
   TranslateFileOptions,
   TranslationResult,
@@ -54,7 +57,12 @@ async function requestBlob(path: string): Promise<Blob> {
 export const api = {
   bootstrap: () => request<BootstrapData>("/bootstrap"),
   history: () => request<HistoryEntry[]>("/history"),
-  logs: () => request<LogsData>("/logs"),
+  logs: <K extends LogKind>(kind: K, page = 1, pageSize = 20) =>
+    request<LogPage<K extends "system" ? SystemLogEntry : AiConversationLog>>(`/logs?kind=${kind}&page=${page}&pageSize=${pageSize}`),
+  deleteLog: (kind: LogKind, id: string) =>
+    request<void>(`/logs/${kind}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  clearLogs: (kind: LogKind, before?: number) =>
+    request<void>(`/logs/${kind}${before === undefined ? "" : `?before=${before}`}`, { method: "DELETE" }),
   translate: (payload: TranslateRequest) =>
     request<TranslationResult>("/translate", { method: "POST", body: JSON.stringify(payload) }),
   translateFile: async (file: File, options: TranslateFileOptions, sourcePath?: string) => {

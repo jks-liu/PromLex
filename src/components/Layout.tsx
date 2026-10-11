@@ -36,9 +36,9 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
     <div className="app-shell">
       <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
         <div className="brand-row">
-          <div className="brand-mark">T</div>
+          <img className="brand-mark" src="/app-icon.png" alt="" />
           <div>
-            <strong>Tranova</strong>
+            <strong>{t("common.productName")}</strong>
             <span>{t("common.productSubtitle")}</span>
           </div>
           <button className="icon-button mobile-close" onClick={() => setMobileOpen(false)} aria-label={t("common.closeMenu")}>
@@ -62,7 +62,7 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
       <div className="main-column">
         <header className="mobile-header">
           <button className="icon-button" onClick={() => setMobileOpen(true)} aria-label={t("common.openMenu")}><Menu size={20} /></button>
-          <strong>Tranova</strong>
+          <strong>{t("common.productName")}</strong>
           <span className={connected ? "status-dot online" : "status-dot"} />
         </header>
         <main>{children}</main>

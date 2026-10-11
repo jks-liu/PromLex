@@ -2794,6 +2794,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "promlex"
+version = "1.0.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "csv",
+ "directories",
+ "fontdb",
+ "lopdf",
+ "mime_guess",
+ "parking_lot",
+ "printpdf",
+ "quick-xml 0.37.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-http",
+ "zip",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.37.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4423,34 +4451,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
-]
-
-[[package]]
-name = "tranova"
-version = "0.1.8"
-dependencies = [
- "axum",
- "base64 0.22.1",
- "csv",
- "directories",
- "fontdb",
- "lopdf",
- "mime_guess",
- "parking_lot",
- "printpdf",
- "quick-xml 0.37.5",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "thiserror 2.0.19",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower-http",
- "zip",
 ]
 
 [[package]]

@@ -347,6 +347,7 @@ function readOptions(defaultProvider: string, defaultPrompt: string): Translatio
     targetLanguage: "zh-CN",
     providerId: defaultProvider,
     promptId: defaultPrompt,
+    additionalPrompt: "",
     glossaryIds: [],
     reasoningEffort: "none",
   };

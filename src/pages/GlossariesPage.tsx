@@ -49,7 +49,7 @@ export function GlossariesPage({ data, onReload }: { data: BootstrapData; onRelo
         <div><h1>{t("glossary.title")}</h1><p>{t("glossary.subtitle")}</p></div>
         <div className="heading-actions">
           <button className="icon-text-button" onClick={() => importRef.current?.click()}><Upload size={17} /> {t("common.import")}</button>
-          <button className="icon-text-button" onClick={() => downloadJson("tranova-glossaries.json", data.glossaries)}><Download size={17} /> {t("common.export")}</button>
+          <button className="icon-text-button" onClick={() => downloadJson("promlex-glossaries.json", data.glossaries)}><Download size={17} /> {t("common.export")}</button>
           <button className="primary-button" onClick={() => setEditing(blankGlossary())}><Plus size={18} /> {t("glossary.new")}</button>
         </div>
       </div>

@@ -12,6 +12,9 @@ for (const viewport of [
 
     await expect(page.locator("h1:visible")).toHaveCount(1);
     await expect(page.locator(".app-shell")).toBeVisible();
+    await expect(page).toHaveTitle("PromLex");
+    await expect(page.locator(".brand-row strong")).toHaveText("PromLex");
+    expect(await page.locator(".brand-mark").evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
     await expect(page).toHaveScreenshot(`${viewport.name}.png`, { animations: "disabled", fullPage: false });
     expect(browserErrors).toEqual([]);
 
@@ -33,6 +36,8 @@ test("Simplified Chinese interface localizes the primary workflow", async ({ pag
   await expect(page.locator("h1:visible")).toHaveText("文本翻译");
   await expect(page.locator(".sidebar-nav")).toContainText("文件翻译");
   await expect(page.locator(".brand-row")).toContainText("AI 翻译工作台");
+  await expect(page.locator(".brand-row strong")).toHaveText("语锚 · PromLex");
+  await expect(page).toHaveTitle("语锚 · PromLex");
 });
 
 test("language options use native names and stay visible while typing", async ({ page }) => {

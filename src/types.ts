@@ -93,6 +93,7 @@ export interface TranslateRequest {
   targetLanguage: string;
   providerId: string;
   promptId?: string;
+  additionalPrompt: string;
   glossaryIds: string[];
   reasoningEffort: ReasoningEffort;
   summarize?: boolean;
@@ -168,4 +169,14 @@ export interface AiConversationLog {
 export interface LogsData {
   system: SystemLogEntry[];
   conversations: AiConversationLog[];
+}
+
+export type LogKind = "system" | "conversations";
+
+export interface LogPage<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }

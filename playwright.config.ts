@@ -12,10 +12,14 @@ export default defineConfig({
     url: "http://127.0.0.1:48731/api/health",
     reuseExistingServer: false,
     timeout: 120_000,
-    env: { ...process.env, TRANOVA_DATA_DIR: resolve("test-results/e2e-data") },
+    env: {
+      ...process.env,
+      PROMLEX_DATA_DIR: resolve("test-results/e2e-data"),
+      TRANOVA_DATA_DIR: resolve("test-results/e2e-data"),
+    },
   },
   use: {
-    baseURL: process.env.TRANOVA_WEB_URL || "http://127.0.0.1:48731",
+    baseURL: process.env.PROMLEX_WEB_URL || process.env.TRANOVA_WEB_URL || "http://127.0.0.1:48731",
     browserName: "chromium",
     headless: true,
     launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH

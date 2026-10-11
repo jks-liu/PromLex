@@ -10,6 +10,7 @@ export interface TranslationOptionsValue {
   targetLanguage: string;
   providerId: string;
   promptId: string;
+  additionalPrompt: string;
   glossaryIds: string[];
   reasoningEffort: ReasoningEffort;
 }
@@ -71,6 +72,14 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
           <option value="">{t("common.none")}</option>
           {prompts.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.name}</option>)}
         </select>
+      </label>
+      <label className="additional-prompt">
+        <span>{t("translate.additionalPrompt")}</span>
+        <textarea
+          value={value.additionalPrompt}
+          onChange={(event) => update({ additionalPrompt: event.target.value })}
+          placeholder={t("translate.additionalPromptPlaceholder")}
+        />
       </label>
       <label>
         <span>{t("translate.reasoning")}</span>

@@ -1,20 +1,21 @@
 [package]
-name = "tranova"
-version = "0.1.8"
+name = "promlex"
+version = "1.0.0"
 description = "AI translation studio for text and documents"
-authors = ["Tranova contributors"]
+authors = ["PromLex contributors"]
 edition = "2021"
 rust-version = "1.88"
 
 [lib]
-name = "tranova_lib"
+name = "promlex_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
-name = "tranova"
+name = "promlex"
 path = "src/main.rs"
 
 [build-dependencies]
+serde_json = "1"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]

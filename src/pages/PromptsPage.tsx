@@ -37,7 +37,7 @@ export function PromptsPage({ data, onReload }: { data: BootstrapData; onReload:
         <div><h1>{t("prompt.title")}</h1><p>{t("prompt.subtitle")}</p></div>
         <div className="heading-actions">
           <button className="icon-text-button" onClick={() => importRef.current?.click()}><Upload size={17} /> {t("common.import")}</button>
-          <button className="icon-text-button" onClick={() => downloadJson("tranova-prompts.json", data.prompts)}><Download size={17} /> {t("common.export")}</button>
+          <button className="icon-text-button" onClick={() => downloadJson("promlex-prompts.json", data.prompts)}><Download size={17} /> {t("common.export")}</button>
           <button className="primary-button" onClick={() => setEditing(blankPrompt())}><Plus size={18} /> {t("prompt.new")}</button>
         </div>
       </div>

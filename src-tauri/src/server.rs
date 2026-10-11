@@ -2,7 +2,7 @@ use std::{io, path::PathBuf, sync::Arc};
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -125,6 +125,8 @@ fn api_router(state: ServerState) -> Router {
         .route("/api/prompts/{id}", delete(delete_prompt))
         .route("/api/settings", put(save_settings))
         .route("/api/logs", get(logs))
+        .route("/api/logs/{kind}", delete(clear_logs))
+        .route("/api/logs/{kind}/{id}", delete(delete_log))
         .route("/api/import/{kind}", post(import_data))
         .layer(DefaultBodyLimit::max(75 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
@@ -508,12 +510,89 @@ async fn history(State(state): State<ApiState>) -> Json<Vec<HistoryEntry>> {
     Json(state.store.snapshot().history)
 }
 
-async fn logs(State(state): State<ApiState>) -> Json<LogsData> {
-    let (system, conversations) = state.store.logs();
-    Json(LogsData {
-        system,
-        conversations,
-    })
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogsQuery {
+    kind: String,
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_page_size")]
+    page_size: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogPage<T> {
+    items: Vec<T>,
+    page: usize,
+    page_size: usize,
+    total: usize,
+    total_pages: usize,
+}
+
+fn default_page() -> usize {
+    1
+}
+fn default_page_size() -> usize {
+    20
+}
+
+async fn logs(
+    State(state): State<ApiState>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Response, ApiError> {
+    let page = query.page.max(1);
+    let page_size = query.page_size.clamp(1, 100);
+    let response = match query.kind.as_str() {
+        "system" => {
+            let (items, total) = state.store.system_logs_page(page, page_size);
+            Json(log_page(items, page, page_size, total)).into_response()
+        }
+        "conversations" => {
+            let (items, total) = state.store.ai_conversations_page(page, page_size);
+            Json(log_page(items, page, page_size, total)).into_response()
+        }
+        _ => return Err(ApiError::bad_request("Unknown log kind")),
+    };
+    Ok(response)
+}
+
+fn log_page<T>(items: Vec<T>, page: usize, page_size: usize, total: usize) -> LogPage<T> {
+    LogPage {
+        items,
+        page,
+        page_size,
+        total,
+        total_pages: total.div_ceil(page_size),
+    }
+}
+
+#[derive(Deserialize)]
+struct ClearLogsQuery {
+    before: Option<u64>,
+}
+
+async fn clear_logs(
+    State(state): State<ApiState>,
+    Path(kind): Path<String>,
+    Query(query): Query<ClearLogsQuery>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .store
+        .clear_logs(&kind, query.before)
+        .map_err(ApiError::from_io)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_log(
+    State(state): State<ApiState>,
+    Path((kind, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .store
+        .delete_log(&kind, &id)
+        .map_err(ApiError::from_io)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn history_id() -> String {
@@ -604,6 +683,7 @@ async fn test_provider(
         target_language: "English".to_string(),
         provider_id: id,
         prompt_id: None,
+        additional_prompt: String::new(),
         glossary_ids: Vec::new(),
         reasoning_effort: "none".to_string(),
         summarize: false,

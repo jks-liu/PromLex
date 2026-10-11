@@ -139,6 +139,17 @@ Unable to summarize document: Responses API returned no output text
 
 - 我使用qwen3.8-27b(vllm with qwen3 reasoning parser)，当前推理开关/强度控制有问题。推理控制好像没有通用方法，但请支持主流模型，比如像vllm一样有一个reasoning parser的选项让用户选择、或根据模型名自动适配。
 
+### 9/21
+
+- Logs中的System logs和AI conversations分成两个tab显示，且应该有分页。并增加清空、清空某日期之前、删除某条的功能。
+- 翻译Prompt（translate和Files）除了可以选择预设，新增在预设prompt的基础上添加额外Prompt文字的功能。
+
+### 10/9
+
+- 我改了文件夹名字就build失败了，这是个问题，请修复
+- 我决定将软件名由`Tranova`改成`PromLex`，请帮我实施
+- 添加一个中文名叫`语锚`，软件图标改成一只可爱的小猫站在羽毛上，羽毛上写着汉字`译`
+
 ## TODO
 - 取消后再翻译可能有问题
 

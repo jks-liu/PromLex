@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Tranova combines a React/TypeScript interface with a Rust/Tauri service. Frontend code lives in `src/`: views are in `src/pages/`, UI in `src/components/`, and API, types, localization, and utilities are at the directory root. Rust code is under `src-tauri/src/`; `server.rs` exposes the loopback API, while `ai.rs`, `files.rs`, `jobs.rs`, `scheduler.rs`, and `store.rs` own backend domains. Desktop configuration and icons live in `src-tauri/`. Unit tests sit beside TypeScript modules as `*.test.ts`; Playwright tests and snapshots are in `tests/e2e/`.
+PromLex combines a React/TypeScript interface with a Rust/Tauri service. Frontend code lives in `src/`: views are in `src/pages/`, UI in `src/components/`, and API, types, localization, and utilities are at the directory root. Rust code is under `src-tauri/src/`; `server.rs` exposes the loopback API, while `ai.rs`, `files.rs`, `jobs.rs`, `scheduler.rs`, and `store.rs` own backend domains. Desktop configuration and icons live in `src-tauri/`. Unit tests sit beside TypeScript modules as `*.test.ts`; Playwright tests and snapshots are in `tests/e2e/`.
 
 ## Product & Architecture Constraints
 

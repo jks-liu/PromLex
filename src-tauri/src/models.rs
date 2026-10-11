@@ -240,6 +240,8 @@ pub struct TranslateOptions {
     #[serde(default)]
     pub prompt_id: Option<String>,
     #[serde(default)]
+    pub additional_prompt: String,
+    #[serde(default)]
     pub glossary_ids: Vec<String>,
     #[serde(default = "default_reasoning_effort")]
     pub reasoning_effort: String,
@@ -265,6 +267,7 @@ impl TranslateOptions {
             target_language: self.target_language,
             provider_id: self.provider_id,
             prompt_id: self.prompt_id,
+            additional_prompt: self.additional_prompt,
             glossary_ids: self.glossary_ids,
             reasoning_effort: self.reasoning_effort,
             summarize: self.summarize,
@@ -326,6 +329,8 @@ pub struct TranslateRequest {
     pub provider_id: String,
     #[serde(default)]
     pub prompt_id: Option<String>,
+    #[serde(default)]
+    pub additional_prompt: String,
     #[serde(default)]
     pub glossary_ids: Vec<String>,
     #[serde(default = "default_reasoning_effort")]

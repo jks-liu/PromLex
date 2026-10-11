@@ -48,6 +48,8 @@ export default function App() {
     }
   }, [i18n]);
 
+  useEffect(() => { document.title = t("common.productName"); }, [t]);
+
   useEffect(() => { void load(); }, [load]);
 
   useEffect(() => {
@@ -58,7 +60,7 @@ export default function App() {
     return (
       <div className="startup-state">
         {error ? <TriangleAlert size={28} /> : <div className="spinner" />}
-        <strong>{error ? t("status.backendUnavailable") : "Tranova"}</strong>
+        <strong>{error ? t("status.backendUnavailable") : t("common.productName")}</strong>
         {error && <><span>{error}</span><button className="secondary-button" onClick={load}><RefreshCw size={17} /> {t("common.retry")}</button></>}
       </div>
     );

@@ -24,7 +24,10 @@ struct StoreInner {
 
 impl AppStore {
     pub fn load() -> Result<Self, io::Error> {
-        let configured_directory = std::env::var_os("TRANOVA_DATA_DIR").map(PathBuf::from);
+        let configured_directory = std::env::var_os("PROMLEX_DATA_DIR")
+            .or_else(|| std::env::var_os("TRANOVA_DATA_DIR"))
+            .map(PathBuf::from);
+        // Retain the legacy location so renaming the app preserves existing user data.
         let project_dirs = if configured_directory.is_none() {
             Some(
                 ProjectDirs::from("com", "Tranova", "Tranova")
@@ -75,6 +78,67 @@ impl AppStore {
     pub fn logs(&self) -> (Vec<SystemLogEntry>, Vec<AiConversationLog>) {
         let data = self.inner.data.read();
         (data.system_logs.clone(), data.ai_conversations.clone())
+    }
+
+    pub fn system_logs_page(&self, page: usize, page_size: usize) -> (Vec<SystemLogEntry>, usize) {
+        let data = self.inner.data.read();
+        (
+            page_slice(&data.system_logs, page, page_size),
+            data.system_logs.len(),
+        )
+    }
+
+    pub fn ai_conversations_page(
+        &self,
+        page: usize,
+        page_size: usize,
+    ) -> (Vec<AiConversationLog>, usize) {
+        let data = self.inner.data.read();
+        (
+            page_slice(&data.ai_conversations, page, page_size),
+            data.ai_conversations.len(),
+        )
+    }
+
+    pub fn delete_log(&self, kind: &str, id: &str) -> Result<(), io::Error> {
+        let mut data = self.inner.data.write();
+        match kind {
+            "system" => data.system_logs.retain(|entry| entry.id != id),
+            "conversations" => data.ai_conversations.retain(|entry| entry.id != id),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Unknown log kind",
+                ))
+            }
+        }
+        drop(data);
+        self.persist()
+    }
+
+    pub fn clear_logs(&self, kind: &str, before: Option<u64>) -> Result<(), io::Error> {
+        let retain = |timestamp: &str| {
+            before.is_some_and(|limit| {
+                timestamp
+                    .parse::<u64>()
+                    .map_or(true, |value| value >= limit)
+            })
+        };
+        let mut data = self.inner.data.write();
+        match kind {
+            "system" => data.system_logs.retain(|entry| retain(&entry.timestamp)),
+            "conversations" => data
+                .ai_conversations
+                .retain(|entry| retain(&entry.timestamp)),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Unknown log kind",
+                ))
+            }
+        }
+        drop(data);
+        self.persist()
     }
 
     pub fn add_system_log(&self, level: &str, scope: &str, message: impl Into<String>) {
@@ -376,6 +440,11 @@ where
     }
 }
 
+fn page_slice<T: Clone>(items: &[T], page: usize, page_size: usize) -> Vec<T> {
+    let start = page.saturating_sub(1).saturating_mul(page_size);
+    items.iter().skip(start).take(page_size).cloned().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, sync::Arc};
@@ -383,7 +452,7 @@ mod tests {
     use parking_lot::RwLock;
 
     use super::{AppStore, StoreInner};
-    use crate::models::{AppData, AppSettings};
+    use crate::models::{AppData, AppSettings, SystemLogEntry};
 
     #[test]
     fn settings_can_be_saved_repeatedly_on_windows() {
@@ -414,6 +483,51 @@ mod tests {
 
         let saved: AppData = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved.settings.proxy_url, "socks5h://127.0.0.1:1080");
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn logs_can_be_paginated_deleted_and_cleared_before_a_timestamp() {
+        let directory = std::env::temp_dir().join(format!(
+            "tranova-log-store-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("data.json");
+        let data = AppData {
+            system_logs: (1..=5)
+                .rev()
+                .map(|value| SystemLogEntry {
+                    id: format!("log-{value}"),
+                    timestamp: (value * 1_000).to_string(),
+                    level: "info".to_string(),
+                    scope: "test".to_string(),
+                    message: value.to_string(),
+                })
+                .collect(),
+            ..AppData::default()
+        };
+        let store = AppStore {
+            inner: Arc::new(StoreInner {
+                path: path.clone(),
+                data: RwLock::new(data),
+            }),
+        };
+
+        let (second_page, total) = store.system_logs_page(2, 2);
+        assert_eq!(total, 5);
+        assert_eq!(second_page[0].id, "log-3");
+        store.delete_log("system", "log-3").unwrap();
+        store.clear_logs("system", Some(4_000)).unwrap();
+        let (remaining, total) = store.system_logs_page(1, 20);
+        assert_eq!(total, 2);
+        assert_eq!(remaining[0].id, "log-5");
+
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
     }

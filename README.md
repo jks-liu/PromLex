@@ -1,6 +1,6 @@
-# Tranova
+# PromLex · 语锚
 
-Tranova is a Tauri-based AI translation studio for text and documents. The desktop app starts a local Web service, so the same interface and features are available in the installed app and at `http://127.0.0.1:48731`.
+PromLex is a Tauri-based AI translation studio for text and documents. The desktop app starts a local Web service, so the same interface and features are available in the installed app and at `http://127.0.0.1:48731`.
 
 ## Features
 
@@ -18,7 +18,7 @@ Tranova is a Tauri-based AI translation studio for text and documents. The deskt
 - Image translation for PNG, JPG and WebP, including images embedded in Office documents, when the configured Responses API provider supports image input and the `image_generation` tool.
 - Local-only Web access with the same React interface and Rust API used by the desktop app.
 
-Office Open XML documents are unpacked locally. Tranova extracts paragraph or text-block content, translates it, replaces the original text, and writes a new document while retaining the package structure and formatting data. Images are left unchanged unless image support is explicitly enabled for the selected provider.
+Office Open XML documents are unpacked locally. PromLex extracts paragraph or text-block content, translates it, replaces the original text, and writes a new document while retaining the package structure and formatting data. Images are left unchanged unless image support is explicitly enabled for the selected provider.
 
 ## Build and Run
 
@@ -65,10 +65,10 @@ To run the Web interface without a Tauri window, build the frontend and start th
 ```powershell
 npm run build
 cargo build --manifest-path src-tauri/Cargo.toml
-src-tauri\target\debug\tranova.exe --server
+src-tauri\target\debug\promlex.exe --server
 ```
 
-Open `http://127.0.0.1:48731` in a browser. On Linux or macOS, use `src-tauri/target/debug/tranova --server` instead. The standalone server is intended for Web access and automated tests; normal desktop users should launch the Tauri application.
+Open `http://127.0.0.1:48731` in a browser. On Linux or macOS, use `src-tauri/target/debug/promlex --server` instead. The standalone server is intended for Web access and automated tests; normal desktop users should launch the Tauri application.
 
 ### Release builds
 
@@ -78,7 +78,7 @@ Build the frontend and an unbundled optimized desktop executable:
 npm run tauri build -- --no-bundle
 ```
 
-The executable is written to `src-tauri/target/release/tranova.exe` on Windows (or `src-tauri/target/release/tranova` on Linux/macOS). This is useful for a quick local smoke test, but it does not create an installer.
+The executable is written to `src-tauri/target/release/promlex.exe` on Windows (or `src-tauri/target/release/promlex` on Linux/macOS). This is useful for a quick local smoke test, but it does not create an installer.
 
 To create the platform installer and bundled application:
 
@@ -139,9 +139,9 @@ The browser installation command is only needed once per machine. If Chromium is
 
 ## Configuration and data
 
-Configure at least one enabled AI provider before translating. Use a base URL that exposes the Responses API and enter the model's context size manually when model discovery does not report it. Provider API keys and all application data are stored in the current user's platform data directory and are never sent to the Tranova Web frontend except through the local loopback service. Web binding is restricted to loopback addresses (`127.0.0.1` or `::1`) so another device cannot read the local configuration.
+Configure at least one enabled AI provider before translating. Use a base URL that exposes the Responses API and enter the model's context size manually when model discovery does not report it. Provider API keys and all application data are stored in the current user's platform data directory and are never sent to the PromLex Web frontend except through the local loopback service. Web binding is restricted to loopback addresses (`127.0.0.1` or `::1`) so another device cannot read the local configuration.
 
-Changes to the Web listening address or port take effect after restarting Tranova. The default prompt can be edited but is retained if deletion is requested, ensuring a usable translation instruction is always available.
+Changes to the Web listening address or port take effect after restarting PromLex. The default prompt can be edited but is retained if deletion is requested, ensuring a usable translation instruction is always available.
 
 ## Troubleshooting
 
@@ -151,10 +151,14 @@ The desktop app and standalone Web server use port `48731` by default. Only one 
 Get-NetTCPConnection -LocalPort 48731 -ErrorAction SilentlyContinue
 ```
 
-Close an existing Tranova instance before starting another standalone server or running the end-to-end suite. The Web address and port can also be changed in Settings; restart Tranova after changing them.
+Close an existing PromLex instance before starting another standalone server or running the end-to-end suite. The Web address and port can also be changed in Settings; restart PromLex after changing them.
 
 For isolated tests or development data, set `TRANOVA_DATA_DIR` to a separate directory before starting the server. This prevents test providers, prompts, glossaries and history from changing your normal application data.
 
 ## Platform notes
 
 Tauri desktop packaging is configured for Windows, Linux and macOS. Mobile packaging is not enabled in this release because the current architecture intentionally exposes no Web service on mobile and would require a separate Tauri command transport for feature parity.
+
+The Chinese product name is **语锚**. PromLex retains the previous Tranova data directory and browser preference keys so existing settings and history remain available. `PROMLEX_DATA_DIR` takes precedence over the compatible `TRANOVA_DATA_DIR` override.
+
+Tauri caches absolute paths to generated plugin permissions. The build script relocates these cached paths when the repository (including `target/`) is moved or renamed; no manual cache cleanup is required.

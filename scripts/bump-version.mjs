@@ -53,7 +53,7 @@ function replaceJsonVersions(text, current, next, count) {
 }
 
 function replaceOne(text, pattern, replacement, file) {
-  if (!pattern.test(text)) throw new Error(`Could not find the Tranova version in ${file}`);
+  if (!pattern.test(text)) throw new Error(`Could not find the PromLex version in ${file}`);
   return text.replace(pattern, replacement);
 }
 
@@ -83,7 +83,7 @@ const versions = [
   ["package-lock.json", packageLockData.version],
   ["package-lock.json packages root", packageLockData.packages?.["" ]?.version],
   ["Cargo.toml", cargoTomlText.match(/^version\s*=\s*\"([^\"]+)\"/m)?.[1]],
-  ["Cargo.lock", cargoLockText.match(/name\s*=\s*\"tranova\"\r?\nversion\s*=\s*\"([^\"]+)\"/)?.[1]],
+  ["Cargo.lock", cargoLockText.match(/name\s*=\s*\"promlex\"\r?\nversion\s*=\s*\"([^\"]+)\"/)?.[1]],
   ["tauri.conf.json", tauriConfigData.version],
 ];
 
@@ -100,7 +100,7 @@ const updatedCargoToml = replaceOne(
 );
 const updatedCargoLock = replaceOne(
   cargoLockText,
-  /(name\s*=\s*\"tranova\"\r?\nversion\s*=\s*\")([^\"]+)(\")/,
+  /(name\s*=\s*\"promlex\"\r?\nversion\s*=\s*\")([^\"]+)(\")/,
   `$1${next}$3`,
   "Cargo.lock",
 );
@@ -111,7 +111,7 @@ await writeFile(files.cargoToml, updatedCargoToml);
 await writeFile(files.cargoLock, updatedCargoLock);
 await writeFile(files.tauriConfig, replaceJsonVersions(tauriConfigText, current, next, 1));
 
-console.log(`Bumped Tranova from ${current} to ${next}`);
+console.log(`Bumped PromLex from ${current} to ${next}`);
 
 if (buildRequested) {
   console.log("Building the Tauri application...");

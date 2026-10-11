@@ -6,6 +6,11 @@ mod scheduler;
 mod server;
 mod store;
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../build_support.rs"]
+mod build_support;
+
 use std::{fs, path::PathBuf, process::Command};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -109,7 +114,7 @@ fn open_path(path: String) -> Result<(), String> {
 }
 
 pub fn run() {
-    let store = AppStore::load().expect("unable to initialize Tranova's user data store");
+    let store = AppStore::load().expect("unable to initialize PromLex's user data store");
     let settings = store.settings();
     let server_address = web_url(&settings.web_host, settings.web_port);
     let server_state = ServerState {
@@ -145,11 +150,11 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Tranova");
+        .expect("error while running PromLex");
 }
 
 pub fn run_server() {
-    let store = AppStore::load().expect("unable to initialize Tranova's user data store");
+    let store = AppStore::load().expect("unable to initialize PromLex's user data store");
     let settings = store.settings();
     let server_address = web_url(&settings.web_host, settings.web_port);
     let state = ServerState {
@@ -166,7 +171,7 @@ pub fn run_server() {
             settings.web_port,
             assets,
         ))
-        .expect("Tranova Web server stopped unexpectedly");
+        .expect("PromLex Web server stopped unexpectedly");
 }
 
 fn web_url(host: &str, port: u16) -> String {

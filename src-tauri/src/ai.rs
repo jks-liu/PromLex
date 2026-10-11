@@ -478,6 +478,10 @@ fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String
     } else {
         rendered
     };
+    if !request.additional_prompt.trim().is_empty() {
+        system.push_str("\n\nAdditional instructions:\n");
+        system.push_str(request.additional_prompt.trim());
+    }
     if let Some(summary) = request
         .context_summary
         .as_deref()
@@ -1346,11 +1350,11 @@ mod tests {
 
     use super::{
         append_chat_completion_stream_line, append_response_stream_line,
-        build_chat_completions_body, build_streaming_client, decode_responses_image,
-        document_summary_request, infer_reasoning_parser, parse_batch_response,
-        send_responses_request, strip_reasoning_markup, truncate_document_summary, Provider,
-        ProxyMode, ReasoningParser, TranslateRequest, MAX_DOCUMENT_SUMMARY_CHARS,
-        SEGMENT_SEPARATOR,
+        build_chat_completions_body, build_messages, build_streaming_client,
+        decode_responses_image, document_summary_request, infer_reasoning_parser,
+        parse_batch_response, send_responses_request, strip_reasoning_markup,
+        truncate_document_summary, AppData, Provider, ProxyMode, ReasoningParser, TranslateRequest,
+        MAX_DOCUMENT_SUMMARY_CHARS, SEGMENT_SEPARATOR,
     };
 
     fn provider(model: &str) -> Provider {
@@ -1394,6 +1398,7 @@ mod tests {
             target_language: "Chinese".to_string(),
             provider_id: "provider".to_string(),
             prompt_id: None,
+            additional_prompt: String::new(),
             glossary_ids: Vec::new(),
             reasoning_effort: "high".to_string(),
             summarize: true,
@@ -1405,6 +1410,28 @@ mod tests {
         assert_eq!(summary.text, "document sample");
         assert_eq!(summary.reasoning_effort, "high");
         assert!(summary.context_summary.is_none());
+    }
+
+    #[test]
+    fn additional_prompt_is_appended_to_the_selected_prompt() {
+        let request = TranslateRequest {
+            text: "Hello".to_string(),
+            source_language: "English".to_string(),
+            target_language: "Chinese".to_string(),
+            provider_id: "provider".to_string(),
+            prompt_id: Some("faithful-translation".to_string()),
+            additional_prompt: "Use a friendly tone.".to_string(),
+            glossary_ids: Vec::new(),
+            reasoning_effort: "none".to_string(),
+            summarize: false,
+            context_summary: None,
+        };
+
+        let (system, user) = build_messages(&AppData::default(), &request);
+
+        assert!(system.contains("Translate faithfully"));
+        assert!(system.ends_with("Additional instructions:\nUse a friendly tone."));
+        assert_eq!(user, "Text to translate:\nHello");
     }
 
     #[test]
