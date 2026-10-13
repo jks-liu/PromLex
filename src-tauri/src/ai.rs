@@ -34,6 +34,20 @@ pub type StreamCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 pub const SEGMENT_SEPARATOR: &str = "\n---TRANOVA-SEGMENT-7F3A---\n";
 const MAX_DOCUMENT_SUMMARY_CHARS: usize = 512;
+const MARTIAN_LANGUAGE_DESCRIPTION: &str = r#"**火星文**是一种非标准中文网络文字，通过替换、拆分、混合字符等方式改变文字外观，通常仍可根据读音、字形和上下文理解原意。
+
+**主要特征：**
+1. **繁体与异体字**：使用繁体字、生僻字、形近字替代原字。
+2. **谐音与错别字**：使用同音、近音字替换，如“偶”代替“我”。
+3. **拆字与混合字符**：混用汉字、拼音、数字、字母、注音、日文、韩文等。
+4. **特殊符号**：插入数学符号、箭头、颜文字及特殊字符，如“の”“★”“囧”。
+
+**示例：**
+- 我喜欢你 → 莪囍歡伱
+- 你在干什么 → 伱恠幹什庅
+- 不知道 → 卟知噵
+
+**识别原则：** 结合谐音、字形和上下文还原原意。火星文无统一规则，单独使用繁体字或网络用语不一定属于火星文。"#;
 
 pub fn contains_segment_separator(text: &str) -> bool {
     text.replace("\r\n", "\n")
@@ -176,10 +190,11 @@ pub async fn translate_image(
             "Selected provider does not support image input/output".to_string(),
         ));
     }
-    let prompt = format!(
+    let mut prompt = format!(
         "Translate every readable text element in this image from {} to {}. Preserve all non-text pixels, composition, layout, visual style, font scale and colors. Replace the original text with the translation and return the edited image only.",
         request.source_language, request.target_language
     );
+    append_language_description(&mut prompt, request);
     let mime = mime_guess::from_path(filename)
         .first_or_octet_stream()
         .to_string();
@@ -438,6 +453,14 @@ fn record_ai_log<E: std::fmt::Display>(
     });
 }
 
+fn append_language_description(prompt: &mut String, request: &TranslateRequest) {
+    if request.source_language.trim() == "火星文" || request.target_language.trim() == "火星文"
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(MARTIAN_LANGUAGE_DESCRIPTION);
+    }
+}
+
 fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String) {
     let glossary = data
         .glossaries
@@ -478,6 +501,7 @@ fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String
     } else {
         rendered
     };
+    append_language_description(&mut system, request);
     if !request.additional_prompt.trim().is_empty() {
         system.push_str("\n\nAdditional instructions:\n");
         system.push_str(request.additional_prompt.trim());
