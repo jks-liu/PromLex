@@ -116,6 +116,30 @@ npm run version:bump -- current
 The script updates `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`. It stops before writing if any of those files contain a different current version.
 By default it only updates version metadata. Add `--build` to run `npm run tauri build` after the update; use `--no-build` to make the choice explicit.
 
+### Automatic GitHub releases
+
+See [the automatic release guide (中文)](RELEASE.md) for setup, release commands, build artifacts and failure recovery.
+
+Push a tag named `releases/vX.Y.Z` to trigger `.github/workflows/release.yml`. The tag must point to a commit containing this workflow, and its version must match all npm, Cargo and Tauri version metadata. Prerelease tags and versions with leading zeroes are rejected.
+
+For example, to release version 1.0.2:
+
+```powershell
+npm run version:bump -- 1.0.2
+node scripts/check-release-version.mjs releases/v1.0.2
+git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+git commit -m "Release 1.0.2"
+git push origin HEAD
+git tag -a releases/v1.0.2 -m "Release 1.0.2"
+git push origin releases/v1.0.2
+```
+
+The workflow runs frontend unit tests, Rust formatting, Clippy and Rust unit tests before packaging. It builds Windows x64 NSIS/MSI installers, Linux x64 DEB/RPM/AppImage packages, and macOS Apple Silicon and Intel DMG installers. Tauri's build step also type-checks and builds the frontend.
+
+Only after every build succeeds does a final job create a draft Release, upload all packages and publish it with generated release notes. Build failures leave no new Release. If uploading fails, the Release stays a draft; rerun the failed job from the Actions tab to finish uploading and publishing. An already published Release is never overwritten by a rerun.
+
+GitHub Actions must be enabled and repository/organization policy must allow the workflow's `contents: write` permission. The workflow uses GitHub's automatic `GITHUB_TOKEN`; no personal access token is needed. Packages currently have no configured Windows signing or macOS signing/notarization; signing requires a separate certificate and secrets setup.
+
 ### Verification
 
 Run the focused checks before packaging:
