@@ -512,8 +512,7 @@ async fn translate_pdf(
     progress: &ProgressCallback,
     state: &mut BatchState,
 ) -> Result<Vec<u8>, FileError> {
-    let mut document = parse_pdf(bytes)?;
-    let page_rotations = pdf_page_rotations(bytes)?;
+    let mut document = parse_pdf(&crate::pdf::extraction_copy(bytes)?)?;
     let blocks = pdf_text_blocks(&document);
     if blocks.is_empty() {
         return Err(FileError::Message(
@@ -531,10 +530,10 @@ async fn translate_pdf(
         state,
     )
     .await?;
-    render_translated_pdf(&mut document, &blocks, &translated, &page_rotations)
+    render_translated_pdf(&mut document, &blocks, &translated, bytes)
 }
 
-const PDF_MIN_FONT_SIZE: f32 = 3.0;
+const PDF_MIN_FONT_SIZE: f32 = 6.0;
 const PDF_LINE_HEIGHT_FACTOR: f32 = 1.15;
 const PDF_COLUMN_GAP_FACTOR: f32 = 2.5;
 
@@ -549,6 +548,16 @@ struct PdfTextBlock {
     bbox: [f32; 4],
     font_size: f32,
     text: String,
+    style: PdfTextStyle,
+    line_height: f32,
+    alignment: PdfTextAlignment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PdfTextAlignment {
+    Left,
+    Center,
+    Right,
 }
 
 #[derive(Debug)]
@@ -556,20 +565,188 @@ struct PdfLineFragment {
     bbox: [f32; 4],
     font_size: f32,
     text: String,
+    style: PdfTextStyle,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PdfTextStyle {
+    color: Color,
+    bold: bool,
+    italic: bool,
+    // Rotation in PDF user space; geometry is projected into this local frame.
+    angle: f32,
+    scale: f32,
+    source_font: Option<FontId>,
+    size: f32,
+}
+
+impl Default for PdfTextStyle {
+    fn default() -> Self {
+        Self {
+            color: Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)),
+            bold: false,
+            italic: false,
+            angle: 0.0,
+            scale: 1.0,
+            source_font: None,
+            size: 12.0,
+        }
+    }
+}
+
+fn pdf_matrix_product(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+        a[0] * b[4] + a[2] * b[5] + a[4],
+        a[1] * b[4] + a[3] * b[5] + a[5],
+    ]
+}
+
+fn pdf_local_bbox(bbox: [f32; 4], angle: f32) -> [f32; 4] {
+    let (s, c) = angle.sin_cos();
+    let mut result = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for (x, y) in [
+        (bbox[0], bbox[1]),
+        (bbox[2], bbox[1]),
+        (bbox[0], bbox[3]),
+        (bbox[2], bbox[3]),
+    ] {
+        let (x, y) = (c * x - s * y, s * x + c * y);
+        result[0] = result[0].min(x);
+        result[1] = result[1].min(y);
+        result[2] = result[2].max(x);
+        result[3] = result[3].max(y);
+    }
+    result
+}
+
+/// One style per emitted glyph, in content-stream order, matching the geometry
+/// extractor. Spaces and TJ offsets do not emit glyph boxes.
+fn pdf_glyph_styles(page: &printpdf::PdfPage, document: &PdfDocument) -> Vec<PdfTextStyle> {
+    let identity = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut ctm = identity;
+    let mut tm = identity;
+    let mut style = PdfTextStyle::default();
+    let mut stack = Vec::new();
+    let mut result = Vec::new();
+    let mut in_text = false;
+    for operation in &page.ops {
+        match operation {
+            Op::SaveGraphicsState => stack.push((ctm, style.clone())),
+            Op::RestoreGraphicsState => {
+                if let Some((matrix, saved)) = stack.pop() {
+                    ctm = matrix;
+                    style = saved;
+                }
+            }
+            Op::SetTransformationMatrix { matrix } => {
+                ctm = pdf_matrix_product(ctm, matrix.as_array())
+            }
+            Op::SetTextMatrix { matrix } => tm = matrix.as_array(),
+            Op::StartTextSection => {
+                in_text = true;
+                tm = identity;
+            }
+            Op::EndTextSection => in_text = false,
+            Op::SetFillColor { col } => style.color = col.clone(),
+            Op::SetFont { font, size } => {
+                style.size = size.0;
+                style.source_font = match font {
+                    PdfFontHandle::External(id) => Some(id.clone()),
+                    _ => None,
+                };
+                let (bold, italic) = match font {
+                    PdfFontHandle::Builtin(font) => (
+                        font.get_font_weight() == "bold",
+                        font.get_font_style() == "italic",
+                    ),
+                    PdfFontHandle::External(id) => {
+                        let name = document
+                            .resources
+                            .fonts
+                            .map
+                            .get(id)
+                            .and_then(|font| font.parsed_font.font_name.as_ref())
+                            .map(|name| name.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        (
+                            name.contains("bold") || name.contains("black"),
+                            name.contains("italic") || name.contains("oblique"),
+                        )
+                    }
+                };
+                style.bold = bold;
+                style.italic = italic;
+            }
+            _ => {}
+        }
+        let matrix = pdf_matrix_product(ctm, tm);
+        style.angle = matrix[1].atan2(matrix[0]);
+        style.scale = matrix[0].hypot(matrix[1]).max(0.01);
+        if !in_text {
+            continue;
+        }
+        match operation {
+            Op::ShowText { items } => {
+                for item in items {
+                    let count = match item {
+                        TextItem::Text(text) => text.chars().filter(|c| *c != ' ').count(),
+                        TextItem::GlyphIds(glyphs) => glyphs
+                            .iter()
+                            .filter(|g| g.cid.as_deref() != Some(" "))
+                            .count(),
+                        TextItem::Offset(_) => 0,
+                    };
+                    result.extend(std::iter::repeat_n(style.clone(), count));
+                }
+            }
+            Op::MoveToNextLineShowText { text } | Op::SetSpacingMoveAndShowText { text, .. } => {
+                result.extend(std::iter::repeat_n(
+                    style.clone(),
+                    text.chars().filter(|c| *c != ' ').count(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 fn parse_pdf(bytes: &[u8]) -> Result<PdfDocument, FileError> {
     let mut warnings = Vec::new();
-    let document = PdfDocument::parse(bytes, &PdfParseOptions::default(), &mut warnings)
+    let mut document = PdfDocument::parse(bytes, &PdfParseOptions::default(), &mut warnings)
         .map_err(|error| FileError::Message(format!("Unable to parse PDF: {error}")))?;
     if document.pages.is_empty() {
         return Err(FileError::Message(
             "Unable to translate PDF because it contains no pages".to_string(),
         ));
     }
+    // The lightweight font parser does not read font names from font programs.
+    // Recover BaseFont from the source dictionaries to retain weight/style.
+    let source = lopdf::Document::load_mem(bytes)
+        .map_err(|error| FileError::Message(format!("Unable to parse PDF fonts: {error}")))?;
+    for page in source.get_pages().into_values() {
+        for (name, dictionary) in source.get_page_fonts(page).unwrap_or_default() {
+            if let Ok(base) = dictionary.get(b"BaseFont").and_then(lopdf::Object::as_name) {
+                let id = FontId(String::from_utf8_lossy(&name).into_owned());
+                if let Some(font) = document.resources.fonts.map.get_mut(&id) {
+                    font.parsed_font.font_name = Some(String::from_utf8_lossy(base).into_owned());
+                }
+            }
+        }
+    }
     Ok(document)
 }
 
+#[cfg(test)]
 fn pdf_page_rotations(bytes: &[u8]) -> Result<Vec<i64>, FileError> {
     let document = lopdf::Document::load_mem(bytes)
         .map_err(|error| FileError::Message(format!("Unable to parse PDF: {error}")))?;
@@ -580,6 +757,7 @@ fn pdf_page_rotations(bytes: &[u8]) -> Result<Vec<i64>, FileError> {
         .collect())
 }
 
+#[cfg(test)]
 fn inherited_pdf_page_number(
     document: &lopdf::Document,
     page_id: lopdf::ObjectId,
@@ -596,14 +774,101 @@ fn inherited_pdf_page_number(
     None
 }
 
+fn pdf_page_barriers(page: &printpdf::PdfPage) -> Vec<[f32; 4]> {
+    let mut ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let mut stack = Vec::new();
+    let mut barriers = Vec::new();
+    for operation in &page.ops {
+        match operation {
+            Op::SaveGraphicsState => stack.push(ctm),
+            Op::RestoreGraphicsState => {
+                if let Some(saved) = stack.pop() {
+                    ctm = saved;
+                }
+            }
+            Op::SetTransformationMatrix { matrix } => {
+                ctm = pdf_matrix_product(ctm, matrix.as_array())
+            }
+            _ => {}
+        }
+        let mut paths = Vec::new();
+        match operation {
+            Op::DrawLine { line } => paths.push((line.points.clone(), line.is_closed)),
+            Op::DrawPolygon { polygon } => {
+                for ring in &polygon.rings {
+                    paths.push((ring.points.clone(), true));
+                }
+            }
+            Op::DrawRectangle { rectangle } => {
+                let polygon = rectangle.to_polygon();
+                for ring in polygon.rings {
+                    paths.push((ring.points, true));
+                }
+            }
+            // In the extraction copy all Form XObjects are expanded. Remaining
+            // Do operators are images, painted in the PDF unit square by CTM.
+            Op::UseXobject { transform, .. } if transform.no_auto_scale => {
+                let mut bbox = [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ];
+                for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                    let (x, y) = (
+                        ctm[0] * x + ctm[2] * y + ctm[4],
+                        page.media_box.height.0 - (ctm[1] * x + ctm[3] * y + ctm[5]),
+                    );
+                    bbox[0] = bbox[0].min(x);
+                    bbox[1] = bbox[1].min(y);
+                    bbox[2] = bbox[2].max(x);
+                    bbox[3] = bbox[3].max(y);
+                }
+                barriers.extend([
+                    [bbox[0], bbox[1], bbox[2], bbox[1]],
+                    [bbox[0], bbox[3], bbox[2], bbox[3]],
+                    [bbox[0], bbox[1], bbox[0], bbox[3]],
+                    [bbox[2], bbox[1], bbox[2], bbox[3]],
+                ]);
+            }
+            _ => {}
+        }
+        for (mut points, closed) in paths {
+            if closed {
+                if let Some(first) = points.first().cloned() {
+                    points.push(first);
+                }
+            }
+            for pair in points.windows(2) {
+                if pair[0].bezier || pair[1].bezier {
+                    continue;
+                }
+                let transform = |point: &printpdf::LinePoint| {
+                    let (x, y) = (point.p.x.0, point.p.y.0);
+                    (
+                        ctm[0] * x + ctm[2] * y + ctm[4],
+                        page.media_box.height.0 - (ctm[1] * x + ctm[3] * y + ctm[5]),
+                    )
+                };
+                let (a, b) = (transform(&pair[0]), transform(&pair[1]));
+                if (a.0 - b.0).abs() < 0.5 || (a.1 - b.1).abs() < 0.5 {
+                    barriers.push([a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]);
+                }
+            }
+        }
+    }
+    barriers
+}
+
 fn pdf_text_blocks(document: &PdfDocument) -> Vec<PdfTextBlock> {
     let mut blocks = Vec::new();
     for (page_index, page) in document.extract_text_boxes().into_iter().enumerate() {
-        let mut fragments = page
-            .lines
-            .into_iter()
-            .flat_map(split_pdf_line_fragments)
-            .collect::<Vec<_>>();
+        let mut styles = pdf_glyph_styles(&document.pages[page_index], document).into_iter();
+        let barriers = pdf_page_barriers(&document.pages[page_index]);
+        let mut fragments = Vec::new();
+        for line in page.lines {
+            fragments.extend(split_pdf_line_fragments(line, &mut styles, &barriers));
+        }
         fragments.sort_by(|left, right| {
             left.bbox[1]
                 .total_cmp(&right.bbox[1])
@@ -615,7 +880,7 @@ fn pdf_text_blocks(document: &PdfDocument) -> Vec<PdfTextBlock> {
             let destination = page_blocks
                 .iter()
                 .enumerate()
-                .filter(|(_, block)| pdf_lines_share_paragraph(block, &fragment))
+                .filter(|(_, block)| pdf_lines_share_paragraph(block, &fragment, &barriers))
                 .min_by(|(_, left), (_, right)| {
                     let left_gap = fragment.bbox[1] - left.bbox[3];
                     let right_gap = fragment.bbox[1] - right.bbox[3];
@@ -629,6 +894,16 @@ fn pdf_text_blocks(document: &PdfDocument) -> Vec<PdfTextBlock> {
 
             if let Some(index) = destination {
                 let block = &mut page_blocks[index];
+                let center_delta =
+                    ((block.bbox[0] + block.bbox[2]) - (fragment.bbox[0] + fragment.bbox[2])).abs();
+                if (block.bbox[0] - fragment.bbox[0]).abs() > block.font_size * 0.3 {
+                    if center_delta < block.font_size * 0.6 {
+                        block.alignment = PdfTextAlignment::Center;
+                    } else if (block.bbox[2] - fragment.bbox[2]).abs() < block.font_size * 0.3 {
+                        block.alignment = PdfTextAlignment::Right;
+                    }
+                }
+                block.line_height = (fragment.bbox[3] - block.bbox[3]).max(block.line_height);
                 block.bbox = pdf_bbox_union(block.bbox, fragment.bbox);
                 block.font_size = block.font_size.max(fragment.font_size);
                 block.text.push(' ');
@@ -639,6 +914,16 @@ fn pdf_text_blocks(document: &PdfDocument) -> Vec<PdfTextBlock> {
                     bbox: fragment.bbox,
                     font_size: fragment.font_size,
                     text: fragment.text,
+                    style: fragment.style.clone(),
+                    line_height: fragment.font_size * PDF_LINE_HEIGHT_FACTOR,
+                    alignment: if fragment.style.angle.abs() < 0.01
+                        && ((fragment.bbox[0] + fragment.bbox[2]) - page.width).abs()
+                            < fragment.font_size
+                    {
+                        PdfTextAlignment::Center
+                    } else {
+                        PdfTextAlignment::Left
+                    },
                 });
             }
         }
@@ -647,33 +932,78 @@ fn pdf_text_blocks(document: &PdfDocument) -> Vec<PdfTextBlock> {
     blocks
 }
 
-fn split_pdf_line_fragments(line: printpdf::text_boxes::TextLine) -> Vec<PdfLineFragment> {
+fn split_pdf_line_fragments(
+    line: printpdf::text_boxes::TextLine,
+    styles: &mut impl Iterator<Item = PdfTextStyle>,
+    barriers: &[[f32; 4]],
+) -> Vec<PdfLineFragment> {
     let mut fragments: Vec<PdfLineFragment> = Vec::new();
-    for word in line.words {
-        if word.text.trim().is_empty() {
-            continue;
-        }
-        let starts_new_fragment = fragments.last().is_some_and(|fragment| {
-            word.bbox[0] - fragment.bbox[2]
-                > word.font_size.max(fragment.font_size) * PDF_COLUMN_GAP_FACTOR
-        });
-        if starts_new_fragment || fragments.is_empty() {
-            fragments.push(PdfLineFragment {
-                bbox: word.bbox,
-                font_size: word.font_size,
-                text: word.text,
+    for (word_index, word) in line.words.into_iter().enumerate() {
+        for (glyph_index, glyph) in word.glyphs.into_iter().enumerate() {
+            let style = styles.next().unwrap_or_default();
+            if glyph.text.trim().is_empty() {
+                continue;
+            }
+            let bbox = pdf_local_bbox(glyph.bbox, style.angle);
+            let font_size = style.size * style.scale;
+            let starts_new_fragment = fragments.last().is_some_and(|fragment| {
+                style != fragment.style
+                    || bbox[0] - fragment.bbox[2]
+                        > font_size.max(fragment.font_size) * PDF_COLUMN_GAP_FACTOR
+                    || barriers.iter().any(|barrier| {
+                        let barrier = pdf_local_bbox(*barrier, style.angle);
+                        barrier[2] - barrier[0] < 0.5
+                            && barrier[0] > fragment.bbox[2]
+                            && barrier[0] < bbox[0]
+                            && barrier[1] < bbox[3]
+                            && barrier[3] > bbox[1]
+                    })
             });
-        } else if let Some(fragment) = fragments.last_mut() {
-            fragment.bbox = pdf_bbox_union(fragment.bbox, word.bbox);
-            fragment.font_size = fragment.font_size.max(word.font_size);
-            fragment.text.push(' ');
-            fragment.text.push_str(&word.text);
+            if starts_new_fragment || fragments.is_empty() {
+                fragments.push(PdfLineFragment {
+                    bbox,
+                    font_size,
+                    text: glyph.text,
+                    style,
+                });
+            } else if let Some(fragment) = fragments.last_mut() {
+                let gap = bbox[0] - fragment.bbox[2];
+                fragment.bbox = pdf_bbox_union(fragment.bbox, bbox);
+                fragment.font_size = fragment.font_size.max(font_size);
+                // Adjacent text runs (including CJK glyphs) need no invented spaces.
+                if gap > font_size * 0.35
+                    || (word_index > 0 && glyph_index == 0 && gap > font_size * 0.12)
+                {
+                    fragment.text.push(' ');
+                }
+                fragment.text.push_str(&glyph.text);
+            }
         }
     }
     fragments
 }
 
-fn pdf_lines_share_paragraph(block: &PdfTextBlock, line: &PdfLineFragment) -> bool {
+fn pdf_lines_share_paragraph(
+    block: &PdfTextBlock,
+    line: &PdfLineFragment,
+    barriers: &[[f32; 4]],
+) -> bool {
+    if block.style != line.style {
+        return false;
+    }
+    if pdf_starts_list_item(&line.text) {
+        return false;
+    }
+    if barriers.iter().any(|barrier| {
+        let barrier = pdf_local_bbox(*barrier, block.style.angle);
+        barrier[3] - barrier[1] < 0.5
+            && barrier[1] >= block.bbox[3]
+            && barrier[1] <= line.bbox[1]
+            && barrier[0] < block.bbox[2].min(line.bbox[2])
+            && barrier[2] > block.bbox[0].max(line.bbox[0])
+    }) {
+        return false;
+    }
     let font_size = block.font_size.max(line.font_size).max(1.0);
     let vertical_gap = line.bbox[1] - block.bbox[3];
     if !(-font_size * 0.2..=font_size * 0.9).contains(&vertical_gap) {
@@ -690,7 +1020,24 @@ fn pdf_lines_share_paragraph(block: &PdfTextBlock, line: &PdfLineFragment) -> bo
     let left_aligned = (block.bbox[0] - line.bbox[0]).abs() <= font_size * 1.5;
     let previous_line_is_full =
         (block.bbox[2] - block.bbox[0]) >= (line.bbox[2] - line.bbox[0]) * 0.7;
-    overlap / narrow_width >= 0.6 && left_aligned && previous_line_is_full
+    let centered =
+        ((block.bbox[0] + block.bbox[2]) - (line.bbox[0] + line.bbox[2])).abs() <= font_size * 0.6;
+    let right_aligned = (block.bbox[2] - line.bbox[2]).abs() <= font_size * 0.3;
+    overlap / narrow_width >= 0.6
+        && (left_aligned || centered || right_aligned)
+        && previous_line_is_full
+}
+
+fn pdf_starts_list_item(text: &str) -> bool {
+    let text = text.trim_start();
+    if text.starts_with(['•', '●', '▪', '◦', '‣'])
+        || text.starts_with("- ")
+        || text.starts_with("* ")
+    {
+        return true;
+    }
+    let rest = text.trim_start_matches(|character: char| character.is_ascii_digit());
+    rest.len() < text.len() && (rest.starts_with(". ") || rest.starts_with(") "))
 }
 
 fn pdf_bbox_union(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
@@ -706,7 +1053,7 @@ fn render_translated_pdf(
     document: &mut PdfDocument,
     blocks: &[PdfTextBlock],
     translated: &[String],
-    page_rotations: &[i64],
+    source: &[u8],
 ) -> Result<Vec<u8>, FileError> {
     if blocks.len() != translated.len() {
         return Err(FileError::Message(
@@ -714,38 +1061,102 @@ fn render_translated_pdf(
                 .to_string(),
         ));
     }
-    let all_text = translated.join("\n");
-    let parsed_fonts = load_pdf_fonts(&all_text)?;
-    let fonts = parsed_fonts
-        .into_iter()
-        .map(|parsed| {
-            let id = document.add_font(&parsed);
-            PdfFont { parsed, id }
+    let mut embedded = HashMap::new();
+    let mut source_fonts = Vec::new();
+    for (block, text) in blocks.iter().zip(translated) {
+        let original = block
+            .style
+            .source_font
+            .as_ref()
+            .and_then(|id| document.resources.fonts.map.get(id))
+            .map(|font| &font.parsed_font)
+            .filter(|font| {
+                !font.original_bytes.is_empty()
+                    && text
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .all(|c| font.lookup_glyph_index(c as u32).is_some())
+            })
+            .cloned();
+        if let Some(parsed) = original {
+            let key = block.style.source_font.clone().unwrap();
+            if !embedded.contains_key(&key) {
+                let id = document.add_font(&parsed);
+                embedded.insert(key.clone(), vec![PdfFont { parsed, id }]);
+            }
+            source_fonts.push(Some(key));
+        } else {
+            source_fonts.push(None);
+        }
+    }
+    let mut font_sets = HashMap::new();
+    for bold in [false, true] {
+        for italic in [false, true] {
+            let text = blocks
+                .iter()
+                .zip(translated)
+                .zip(&source_fonts)
+                .filter(|((block, _), source)| {
+                    source.is_none() && block.style.bold == bold && block.style.italic == italic
+                })
+                .map(|((_, text), _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            let fonts = load_pdf_fonts_with_style(&text, bold, italic)?
+                .into_iter()
+                .map(|parsed| {
+                    let id = document.add_font(&parsed);
+                    PdfFont { parsed, id }
+                })
+                .collect::<Vec<_>>();
+            font_sets.insert((bold, italic), fonts);
+        }
+    }
+    let barriers = document
+        .pages
+        .iter()
+        .map(pdf_page_barriers)
+        .collect::<Vec<_>>();
+    let layout = blocks
+        .iter()
+        .map(|block| {
+            pdf_available_box(
+                block,
+                blocks,
+                &barriers[block.page_index],
+                &document.pages[block.page_index],
+            )
         })
         .collect::<Vec<_>>();
-
+    // Generate translation only. The original PDF is edited separately with lopdf.
     for page in &mut document.pages {
-        page.ops.retain(|operation| {
-            !matches!(
-                operation,
-                Op::ShowText { .. }
-                    | Op::MoveToNextLineShowText { .. }
-                    | Op::SetSpacingMoveAndShowText { .. }
-            )
-        });
+        page.ops.clear();
     }
-    for (block, text) in blocks.iter().zip(translated) {
+    for (((block, text), bbox), source_font) in
+        blocks.iter().zip(translated).zip(layout).zip(source_fonts)
+    {
+        if text.trim().is_empty() {
+            continue;
+        }
         let Some(page) = document.pages.get_mut(block.page_index) else {
             return Err(FileError::Message(
                 "Unable to build translated PDF because a page is missing".to_string(),
             ));
         };
+        let mut fitted = block.clone();
+        fitted.bbox = bbox;
         page.ops.extend(render_pdf_block(
-            block,
+            &fitted,
             text,
             page.media_box.height.0,
-            &fonts,
-        ));
+            match source_font {
+                Some(id) => &embedded[&id],
+                None => &font_sets[&(block.style.bold, block.style.italic)],
+            },
+        )?);
     }
 
     let mut warnings = Vec::new();
@@ -756,7 +1167,7 @@ fn render_translated_pdf(
         },
         &mut warnings,
     );
-    let bytes = restore_pdf_page_rotations(bytes, page_rotations)?;
+    let bytes = crate::pdf::apply_translation(source, &bytes)?;
     if bytes.starts_with(b"%PDF-") {
         Ok(bytes)
     } else {
@@ -766,33 +1177,69 @@ fn render_translated_pdf(
     }
 }
 
-fn restore_pdf_page_rotations(
-    bytes: Vec<u8>,
-    page_rotations: &[i64],
-) -> Result<Vec<u8>, FileError> {
-    let mut document = lopdf::Document::load_mem(&bytes)
-        .map_err(|error| FileError::Message(format!("Unable to finalize PDF: {error}")))?;
-    let pages = document.get_pages().into_values().collect::<Vec<_>>();
-    if pages.len() != page_rotations.len() {
-        return Err(FileError::Message(
-            "Unable to finalize PDF because its page count changed".to_string(),
-        ));
+fn pdf_available_box(
+    block: &PdfTextBlock,
+    blocks: &[PdfTextBlock],
+    barriers: &[[f32; 4]],
+    page: &printpdf::PdfPage,
+) -> [f32; 4] {
+    // Rotated labels keep their original local bounds; page margins and column
+    // neighbors are meaningful in page coordinates only for horizontal text.
+    if block.style.angle.abs() > 0.01 {
+        return block.bbox;
     }
-    for (page_id, rotation) in pages.into_iter().zip(page_rotations) {
-        if *rotation != 0 {
-            document
-                .get_dictionary_mut(page_id)
-                .map_err(|error| {
-                    FileError::Message(format!("Unable to finalize PDF page: {error}"))
-                })?
-                .set("Rotate", *rotation);
+    let mut bbox = block.bbox;
+    let margin = block.bbox[0].clamp(0.0, 24.0);
+    let mut right = (page.media_box.x.0 + page.media_box.width.0 - margin).max(bbox[2]);
+    let mut bottom = (page.media_box.height.0 - margin).max(bbox[3]);
+    for neighbor in blocks
+        .iter()
+        .filter(|other| other.page_index == block.page_index)
+    {
+        if std::ptr::eq(block, neighbor) {
+            continue;
+        }
+        if neighbor.bbox[0] >= bbox[2] && neighbor.bbox[1] < bbox[3] && neighbor.bbox[3] > bbox[1] {
+            right = right.min((bbox[2] + neighbor.bbox[0]) / 2.0);
         }
     }
-    let mut output = Vec::with_capacity(bytes.len());
-    document
-        .save_to(&mut output)
-        .map_err(|error| FileError::Message(format!("Unable to finalize PDF: {error}")))?;
-    Ok(output)
+    for barrier in barriers {
+        if barrier[2] - barrier[0] < 0.5
+            && barrier[0] >= bbox[2]
+            && barrier[1] < bbox[3]
+            && barrier[3] > bbox[1]
+        {
+            right = right.min(barrier[0] - 2.0);
+        }
+    }
+    if block.alignment != PdfTextAlignment::Left {
+        right = bbox[2];
+    }
+    // Reserve existing text below across the expanded width, including headings,
+    // columns and table cells. Expansions never claim another block's space.
+    for neighbor in blocks
+        .iter()
+        .filter(|other| other.page_index == block.page_index)
+    {
+        if std::ptr::eq(block, neighbor) {
+            continue;
+        }
+        if neighbor.bbox[1] >= bbox[3] && neighbor.bbox[0] < right && neighbor.bbox[2] > bbox[0] {
+            bottom = bottom.min(neighbor.bbox[1] - 2.0);
+        }
+    }
+    for barrier in barriers {
+        if barrier[3] - barrier[1] < 0.5
+            && barrier[1] >= bbox[3]
+            && barrier[0] < right
+            && barrier[2] > bbox[0]
+        {
+            bottom = bottom.min(barrier[1] - 2.0);
+        }
+    }
+    bbox[2] = right.max(bbox[2]);
+    bbox[3] = bottom.max(bbox[3]);
+    bbox
 }
 
 fn render_pdf_block(
@@ -800,28 +1247,60 @@ fn render_pdf_block(
     text: &str,
     page_height: f32,
     fonts: &[PdfFont],
-) -> Vec<Op> {
+) -> Result<Vec<Op>, FileError> {
     let width = (block.bbox[2] - block.bbox[0]).max(1.0);
     let height = (block.bbox[3] - block.bbox[1]).max(1.0);
-    let (font_size, lines) = fit_pdf_text(text, block.font_size, width, height, fonts);
-    let line_height = font_size * PDF_LINE_HEIGHT_FACTOR;
+    let (font_size, lines) = fit_pdf_text(
+        text,
+        block.font_size,
+        width,
+        height,
+        block.line_height / block.font_size.max(0.1),
+        fonts,
+    )?;
+    let line_height = font_size * (block.line_height / block.font_size.max(0.1)).max(1.0);
     let mut operations = vec![
         Op::SaveGraphicsState,
         Op::SetFillColor {
-            col: Color::Rgb(Rgb::new(0.0, 0.0, 0.0, None)),
+            col: block.style.color.clone(),
         },
         Op::StartTextSection,
+        Op::SetCharacterSpacing { multiplier: 0.0 },
+        Op::SetWordSpacing { pt: Pt(0.0) },
+        Op::SetHorizontalScaling { percent: 100.0 },
+        Op::SetLineOffset { multiplier: 0.0 },
+        Op::SetTextRenderingMode {
+            mode: printpdf::TextRenderingMode::Fill,
+        },
     ];
     for (line_index, line) in lines.iter().enumerate() {
-        let baseline_from_top = block.bbox[1] + font_size * 0.82 + line_index as f32 * line_height;
+        let ascent = fonts
+            .iter()
+            .map(|font| {
+                font.parsed.font_metrics.ascent as f32 / font.parsed.units_per_em.max(1) as f32
+            })
+            .fold(0.0_f32, f32::max);
+        let baseline_from_top =
+            block.bbox[1] + font_size * ascent + line_index as f32 * line_height;
+        let (s, c) = block.style.angle.sin_cos();
+        let line_width = line
+            .chars()
+            .map(|character| pdf_character_width(character, font_size, fonts))
+            .sum::<f32>();
+        let x = block.bbox[0]
+            + match block.alignment {
+                PdfTextAlignment::Left => 0.0,
+                PdfTextAlignment::Center => (width - line_width) / 2.0,
+                PdfTextAlignment::Right => width - line_width,
+            };
         operations.push(Op::SetTextMatrix {
             matrix: TextMatrix::Raw([
-                1.0,
-                0.0,
-                0.0,
-                1.0,
-                block.bbox[0],
-                page_height - baseline_from_top,
+                c,
+                s,
+                -s,
+                c,
+                c * x + s * baseline_from_top,
+                page_height - (-s * x + c * baseline_from_top),
             ]),
         });
         for (font_index, run) in pdf_font_runs(line, fonts) {
@@ -835,7 +1314,7 @@ fn render_pdf_block(
         }
     }
     operations.extend([Op::EndTextSection, Op::RestoreGraphicsState]);
-    operations
+    Ok(operations)
 }
 
 fn fit_pdf_text(
@@ -843,21 +1322,44 @@ fn fit_pdf_text(
     preferred_font_size: f32,
     width: f32,
     height: f32,
+    line_height_factor: f32,
     fonts: &[PdfFont],
-) -> (f32, Vec<String>) {
+) -> Result<(f32, Vec<String>), FileError> {
     let cleaned = clean_pdf_text(text);
-    let mut font_size = preferred_font_size.clamp(PDF_MIN_FONT_SIZE, 96.0);
+    let minimum = (preferred_font_size * 0.55)
+        .max(PDF_MIN_FONT_SIZE)
+        .min(preferred_font_size);
+    let mut font_size = preferred_font_size;
     loop {
         let lines = wrap_pdf_text(&cleaned, font_size, width, fonts);
         let required_height = if lines.is_empty() {
             0.0
         } else {
-            font_size + (lines.len() - 1) as f32 * font_size * PDF_LINE_HEIGHT_FACTOR
+            let extent = fonts
+                .iter()
+                .map(|font| {
+                    (font.parsed.font_metrics.ascent as f32
+                        - font.parsed.font_metrics.descent as f32)
+                        / font.parsed.units_per_em.max(1) as f32
+                })
+                .fold(1.0_f32, f32::max);
+            font_size * extent + (lines.len() - 1) as f32 * font_size * line_height_factor.max(1.0)
         };
-        if required_height <= height + font_size * 0.25 || font_size <= PDF_MIN_FONT_SIZE {
-            return (font_size, lines);
+        let fits_width = lines.iter().all(|line| {
+            line.chars()
+                .map(|character| pdf_character_width(character, font_size, fonts))
+                .sum::<f32>()
+                <= width + 0.1
+        });
+        if required_height <= height + 0.1 && fits_width {
+            return Ok((font_size, lines));
         }
-        font_size = (font_size - 0.25).max(PDF_MIN_FONT_SIZE);
+        if font_size <= minimum {
+            return Err(FileError::Message(format!(
+                "Translated PDF text cannot fit its original layout at a readable font size ({minimum:.1}pt). Try translation-only output or a shorter translation."
+            )));
+        }
+        font_size = (font_size - 0.25).max(minimum);
     }
 }
 
@@ -868,7 +1370,16 @@ fn clean_pdf_text(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn load_pdf_fonts(text: &str) -> Result<Vec<ParsedFont>, FileError> {
+    load_pdf_fonts_with_style(text, false, false)
+}
+
+fn load_pdf_fonts_with_style(
+    text: &str,
+    bold: bool,
+    italic: bool,
+) -> Result<Vec<ParsedFont>, FileError> {
     let required = text
         .chars()
         .filter(|character| !character.is_control())
@@ -902,28 +1413,70 @@ fn load_pdf_fonts(text: &str) -> Result<Vec<ParsedFont>, FileError> {
         "Arial",
     ];
     let mut preferred_ids = Vec::new();
+    // A variable font may expose only its default (e.g. Thin) face to fontdb.
+    // A family-name match alone must not override the requested text weight.
+    let matches_weight = |id| {
+        database.face(id).is_some_and(|face| {
+            if bold {
+                face.weight.0 >= 600
+            } else {
+                (300..=500).contains(&face.weight.0)
+            }
+        })
+    };
     for family in preferred_families {
         if let Some(id) = database.query(&FontQuery {
             families: &[FontFamily::Name(family)],
+            weight: if bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
+            style: if italic { Style::Italic } else { Style::Normal },
             ..FontQuery::default()
         }) {
-            if !preferred_ids.contains(&id) {
+            if matches_weight(id) && !preferred_ids.contains(&id) {
                 preferred_ids.push(id);
             }
         }
     }
     if let Some(id) = database.query(&FontQuery {
         families: &[FontFamily::SansSerif],
+        weight: if bold {
+            fontdb::Weight::BOLD
+        } else {
+            fontdb::Weight::NORMAL
+        },
+        style: if italic { Style::Italic } else { Style::Normal },
         ..FontQuery::default()
     }) {
-        if !preferred_ids.contains(&id) {
+        if matches_weight(id) && !preferred_ids.contains(&id) {
             preferred_ids.push(id);
         }
     }
 
-    let all_ids = database
-        .faces()
-        .filter(|face| face.style == Style::Normal)
+    let requested_style = if italic { Style::Italic } else { Style::Normal };
+    let requested_weight = if bold {
+        fontdb::Weight::BOLD
+    } else {
+        fontdb::Weight::NORMAL
+    };
+    let mut fallback_faces = database.faces().collect::<Vec<_>>();
+    fallback_faces.sort_by_key(|face| {
+        (
+            if face.style == requested_style {
+                0
+            } else if face.style == Style::Normal {
+                1
+            } else {
+                2
+            },
+            face.weight.0.abs_diff(requested_weight.0),
+            face.monospaced,
+        )
+    });
+    let all_ids = fallback_faces
+        .into_iter()
         .map(|face| face.id)
         .collect::<Vec<_>>();
     let mut remaining = required;
@@ -967,11 +1520,13 @@ fn best_pdf_font(
         .copied()
         .filter(|id| !used_ids.contains(id))
     {
-        let Some(Some(parsed)) = database.with_face_data(id, |bytes, index| {
-            ParsedFont::from_bytes(bytes, index as usize, &mut Vec::new())
+        let Some(Some(mut parsed)) = database.with_face_data(id, |bytes, index| {
+            let face = crate::pdf::standalone_font_face(bytes, index)?;
+            ParsedFont::from_bytes(&face, 0, &mut Vec::new())
         }) else {
             continue;
         };
+        parsed.font_name = database.face(id).map(|face| face.post_script_name.clone());
         let covered = required
             .iter()
             .copied()
@@ -1051,6 +1606,17 @@ fn wrap_pdf_text(text: &str, font_size: f32, maximum_width: f32, fonts: &[PdfFon
             if end < characters.len() {
                 if let Some(index) = whitespace.filter(|index| *index > start) {
                     end = index;
+                } else {
+                    // Keep CJK closing punctuation off the next line and opening
+                    // punctuation off the previous line, without exceeding width.
+                    let mut boundary = end;
+                    while boundary > start + 1
+                        && ("，。！？；：、）》】」』〕〉…,.!?;:%".contains(characters[boundary])
+                            || "（《【「『〔〈(".contains(characters[boundary - 1]))
+                    {
+                        boundary -= 1;
+                    }
+                    end = boundary;
                 }
             }
             lines.push(characters[start..end].iter().collect());
@@ -1082,7 +1648,7 @@ fn extract_summary_text(filename: &str, bytes: &[u8], maximum: usize) -> Result<
         .unwrap_or("")
         .to_ascii_lowercase();
     let mut text = match extension.as_str() {
-        "pdf" => parse_pdf(bytes)?
+        "pdf" => parse_pdf(&crate::pdf::extraction_copy(bytes)?)?
             .extract_text()
             .into_iter()
             .flatten()
@@ -2378,11 +2944,11 @@ mod tests {
             .iter()
             .map(|block| format!("Translated page {}", block.page_index + 1))
             .collect::<Vec<_>>();
-        let pdf = render_translated_pdf(&mut document, &blocks, &translations, &rotations).unwrap();
+        let pdf = render_translated_pdf(&mut document, &blocks, &translations, &source).unwrap();
         assert!(pdf.starts_with(b"%PDF-"));
         assert_eq!(pdf_page_rotations(&pdf).unwrap(), rotations);
 
-        let translated = parse_pdf(&pdf).unwrap();
+        let translated = parse_pdf(&crate::pdf::extraction_copy(&pdf).unwrap()).unwrap();
         assert_eq!(translated.pages.len(), 2);
         assert_eq!(
             translated
@@ -2392,10 +2958,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             source_widths
         );
-        assert!(translated.pages[0]
-            .ops
+        let source_raw = lopdf::Document::load_mem(&source).unwrap();
+        let result_raw = lopdf::Document::load_mem(&pdf).unwrap();
+        let source_ops = lopdf::content::Content::decode(
+            &source_raw.get_page_content(source_raw.get_pages()[&1]),
+        )
+        .unwrap();
+        let result_ops = lopdf::content::Content::decode(
+            &result_raw.get_page_content(result_raw.get_pages()[&1]),
+        )
+        .unwrap();
+        let rectangle = source_ops
+            .operations
             .iter()
-            .any(|operation| matches!(operation, Op::DrawRectangle { .. })));
+            .find(|operation| operation.operator == "re")
+            .unwrap();
+        assert!(result_ops
+            .operations
+            .iter()
+            .any(|operation| operation.operator == rectangle.operator
+                && operation.operands == rectangle.operands));
         let extracted = translated
             .extract_text()
             .into_iter()
@@ -2422,5 +3004,307 @@ mod tests {
         let lines = wrap_pdf_text(&text, 12.0, 80.0, &fonts);
         assert!(lines.len() > 1);
         assert_eq!(lines.concat(), text);
+    }
+
+    fn complex_layout_pdf() -> Vec<u8> {
+        use lopdf::{dictionary, Document, Object, Stream};
+        let mut document = Document::with_version("1.7");
+        let regular = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let bold = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica-BoldOblique",
+        });
+        let inner = document.add_object(Stream::new(dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),180.into(),45.into()],
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => bold } },
+        }, b"0.15 0.35 0.65 rg BT /F1 12 Tf 1 0 0 1 8 18 Tm (Nested label) Tj ET".to_vec()));
+        let outer = document.add_object(Stream::new(dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),180.into(),55.into()],
+            "Matrix" => vec![1.into(),0.into(),0.into(),1.into(),0.into(),5.into()],
+            "Resources" => dictionary! { "XObject" => dictionary! { "Inner" => inner } },
+        }, b"0.85 0.93 1 rg 0 0 180 45 re f /Inner Do".to_vec()));
+        let image = document.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 2, "Height" => 2,
+                "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+            },
+            vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0],
+        ));
+        let resources = document.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => regular, "F2" => bold },
+            "XObject" => dictionary! { "Card" => outer, "Picture" => image },
+        });
+        let content = document.add_object(Stream::new(
+            lopdf::Dictionary::new(),
+            br#"
+            0.15 0.35 0.65 rg BT /F2 24 Tf 1 0 0 1 60 745 Tm (Layout report) Tj ET
+            0 g BT /F1 12 Tf 1 0 0 1 60 685 Tm (Left column first line.) Tj
+            1 0 0 1 60 669 Tm (Left column second line.) Tj ET
+            BT /F1 12 Tf 1 0 0 1 330 685 Tm (Right column first line.) Tj
+            1 0 0 1 330 669 Tm (Right column second line.) Tj ET
+            0.4 w 0 G 60 550 480 60 re S 60 580 m 540 580 l S 300 550 m 300 610 l S
+            BT /F1 11 Tf 1 0 0 1 245 591 Tm (Quantity) Tj 1 0 0 1 307 591 Tm (Price) Tj ET
+            BT /F1 11 Tf 1 0 0 1 245 569 Tm (Widgets) Tj 1 0 0 1 307 569 Tm (Total) Tj ET
+            q 1 0 0 1 60 430 cm /Card Do Q q 1 0 0 1 330 430 cm /Card Do Q
+            BT 1 0 0 1 60 380 Tm (Inherited face) Tj ET
+            q 150 0 0 90 60 250 cm /Picture Do Q
+            BT /F1 12 Tf 0 1 -1 0 575 300 Tm (Side label) Tj ET
+            BT /F1 6 Tf 1 0 0 1 60 80 Tm (Small footnote.) Tj ET
+        "#
+            .to_vec(),
+        ));
+        let pages = document.new_object_id();
+        let page = document.new_object_id();
+        let link = document.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![60.into(),730.into(),250.into(),775.into()],
+            "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") },
+        });
+        document.objects.insert(
+            page,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page", "Parent" => pages, "Contents" => content,
+                "Annots" => vec![Object::Reference(link)], "Rotate" => 0,
+                "TrimBox" => vec![20.into(),20.into(),580.into(),780.into()],
+            }),
+        );
+        document.objects.insert(pages, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1,
+            "MediaBox" => vec![0.into(),0.into(),600.into(),800.into()],
+            "CropBox" => vec![10.into(),10.into(),590.into(),790.into()], "Resources" => resources,
+        }));
+        let outline = document.new_object_id();
+        let entry = document.add_object(dictionary! {
+            "Title" => Object::string_literal("Layout report"), "Parent" => outline,
+            "Dest" => vec![Object::Reference(page), Object::Name(b"Fit".to_vec())],
+        });
+        document.objects.insert(
+            outline,
+            Object::Dictionary(dictionary! {
+                "Type" => "Outlines", "First" => entry, "Last" => entry, "Count" => 1,
+            }),
+        );
+        let catalog = document.add_object(
+            dictionary! { "Type" => "Catalog", "Pages" => pages, "Outlines" => outline },
+        );
+        let info = document
+            .add_object(dictionary! { "Title" => Object::string_literal("Preserved metadata") });
+        document.trailer.set("Root", catalog);
+        document.trailer.set("Info", info);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn pdf_layout_handles_columns_table_cells_styles_and_nested_forms() {
+        let bytes = complex_layout_pdf();
+        let document = parse_pdf(&crate::pdf::extraction_copy(&bytes).unwrap()).unwrap();
+        let blocks = pdf_text_blocks(&document);
+        assert_eq!(blocks.len(), 12, "{blocks:#?}");
+        let inherited = blocks
+            .iter()
+            .find(|block| block.text == "Inherited face")
+            .unwrap();
+        assert!(!inherited.style.bold && !inherited.style.italic);
+        assert_eq!(inherited.font_size, 11.0);
+        let left = blocks
+            .iter()
+            .find(|block| block.text.starts_with("Left"))
+            .unwrap();
+        assert_eq!(
+            left.text,
+            "Left column first line. Left column second line."
+        );
+        let right = blocks
+            .iter()
+            .find(|block| block.text.starts_with("Right"))
+            .unwrap();
+        assert_eq!(
+            right.text,
+            "Right column first line. Right column second line."
+        );
+        for text in ["Quantity", "Price", "Widgets", "Total"] {
+            assert!(blocks.iter().any(|block| block.text == text), "{blocks:#?}");
+        }
+        let cards = blocks
+            .iter()
+            .filter(|block| block.text == "Nested label")
+            .collect::<Vec<_>>();
+        assert_eq!(cards.len(), 2);
+        assert!((cards[1].bbox[0] - cards[0].bbox[0] - 270.0).abs() < 0.1);
+        let title = blocks
+            .iter()
+            .find(|block| block.text == "Layout report")
+            .unwrap();
+        assert!(title.style.bold && title.style.italic);
+        assert_eq!(
+            title.style.color,
+            Color::Rgb(Rgb::new(0.15, 0.35, 0.65, None))
+        );
+        let side = blocks
+            .iter()
+            .find(|block| block.text == "Side label")
+            .unwrap();
+        assert!((side.style.angle - std::f32::consts::FRAC_PI_2).abs() < 0.01);
+        let barriers = super::pdf_page_barriers(&document.pages[0]);
+        let available = super::pdf_available_box(left, &blocks, &barriers, &document.pages[0]);
+        assert!(available[2] < right.bbox[0]);
+        assert!(
+            available[3] < 190.0,
+            "available={available:?}, barriers={barriers:?}"
+        ); // table top is y=190 in top-left coordinates
+        let quantity = blocks
+            .iter()
+            .find(|block| block.text == "Quantity")
+            .unwrap();
+        let cell = super::pdf_available_box(quantity, &blocks, &barriers, &document.pages[0]);
+        assert!(cell[2] <= 298.0 && cell[3] <= 218.0);
+    }
+
+    #[test]
+    fn pdf_translation_preserves_original_objects_and_readable_multilingual_layout() {
+        let source = complex_layout_pdf();
+        let original = lopdf::Document::load_mem(&source).unwrap();
+        let mut parsed = parse_pdf(&crate::pdf::extraction_copy(&source).unwrap()).unwrap();
+        let blocks = pdf_text_blocks(&parsed);
+        let mut translated = blocks
+            .iter()
+            .map(|block| {
+                match block.text.as_str() {
+                    "Layout report" => "排版报告",
+                    "Quantity" => "数量",
+                    "Price" => "价格",
+                    "Widgets" => "产品",
+                    "Total" => "合计",
+                    "Nested label" => "嵌套标签",
+                    "Inherited face" => "继承字体",
+                    "Side label" => "侧边标签",
+                    "Small footnote." => "小字号脚注。",
+                    text if text.starts_with("Left") => {
+                        "左栏的第一句话。翻译长度增加时，应保留分栏及正文的字号和位置。"
+                    }
+                    _ => "右栏的第一句话。译文应在本栏内换行，避免跨栏覆盖其他文字。",
+                }
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        // Linux installations often have Latin fonts but no CJK font package.
+        // Still exercise Unicode embedding and the full layout/object checks.
+        if load_pdf_fonts(&translated.join("\n")).is_err() {
+            translated = blocks.iter().map(|block| match block.text.as_str() {
+                "Layout report" => "Rapport détaillé", "Quantity" => "Quantité",
+                "Price" => "Prix", "Widgets" => "Articles", "Total" => "Total",
+                "Nested label" => "Étiquette", "Inherited face" => "Police héritée",
+                "Side label" => "Libellé", "Small footnote." => "Petite note.",
+                text if text.starts_with("Left") => "Première phrase à gauche. La traduction garde les colonnes et la taille du texte.",
+                _ => "Première phrase à droite. Le texte doit rester dans sa colonne sans recouvrir les autres éléments.",
+            }.to_string()).collect();
+        }
+        let output = render_translated_pdf(&mut parsed, &blocks, &translated, &source).unwrap();
+        let result = lopdf::Document::load_mem(&output).unwrap();
+        let page = original.get_pages()[&1];
+        for key in [b"Parent".as_slice(), b"Annots", b"TrimBox", b"Rotate"] {
+            assert_eq!(
+                original.get_dictionary(page).unwrap().get(key).unwrap(),
+                result.get_dictionary(page).unwrap().get(key).unwrap()
+            );
+        }
+        let parent = original
+            .get_dictionary(page)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        for key in [b"MediaBox".as_slice(), b"CropBox"] {
+            assert_eq!(
+                original.get_dictionary(parent).unwrap().get(key).unwrap(),
+                result.get_dictionary(parent).unwrap().get(key).unwrap()
+            );
+        }
+        for key in [b"Root".as_slice(), b"Info"] {
+            assert_eq!(
+                original.trailer.get(key).unwrap(),
+                result.trailer.get(key).unwrap()
+            );
+        }
+        for (id, object) in &original.objects {
+            if let Ok(stream) = object.as_stream() {
+                if stream
+                    .dict
+                    .get(b"Subtype")
+                    .and_then(lopdf::Object::as_name)
+                    .ok()
+                    == Some(b"Image")
+                {
+                    let preserved = result.get_object(*id).unwrap().as_stream().unwrap();
+                    assert_eq!(
+                        stream.get_plain_content().unwrap(),
+                        preserved.get_plain_content().unwrap()
+                    );
+                }
+            }
+            if object
+                .as_dict()
+                .is_ok_and(|dictionary| dictionary.has(b"Dest") || dictionary.has(b"A"))
+            {
+                assert_eq!(object, result.get_object(*id).unwrap());
+            }
+        }
+        let extracted = parse_pdf(&crate::pdf::extraction_copy(&output).unwrap()).unwrap();
+        let text = extracted
+            .extract_text()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("");
+        for translation in &translated {
+            let normalized = text
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>();
+            assert!(
+                normalized.contains(
+                    &translation
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect::<String>()
+                ),
+                "{text}"
+            );
+        }
+        assert!(!text.contains("Nested label") && !text.contains("Layout report"));
+        if let Some(directory) = std::env::var_os("PROMLEX_PDF_FIXTURE_DIR") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("source.pdf"), source).unwrap();
+            std::fs::write(directory.join("translated.pdf"), output).unwrap();
+        }
+    }
+
+    #[test]
+    fn pdf_fitting_rejects_overflow_instead_of_printing_over_neighbors() {
+        let fonts = load_pdf_fonts("long translation")
+            .unwrap()
+            .into_iter()
+            .map(|parsed| PdfFont {
+                parsed,
+                id: printpdf::FontId::new(),
+            })
+            .collect::<Vec<_>>();
+        assert!(super::fit_pdf_text(
+            &"long translation ".repeat(100),
+            12.0,
+            40.0,
+            12.0,
+            1.15,
+            &fonts
+        )
+        .is_err());
+        let (size, lines) =
+            super::fit_pdf_text("footnote", 5.0, 100.0, 10.0, 1.15, &fonts).unwrap();
+        assert_eq!(size, 5.0);
+        assert_eq!(lines, ["footnote"]);
     }
 }

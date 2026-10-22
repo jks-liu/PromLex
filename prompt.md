@@ -150,6 +150,10 @@ Unable to summarize document: Responses API returned no output text
 - 我决定将软件名由`Tranova`改成`PromLex`，请帮我实施
 - 添加一个中文名叫`语锚`，软件图标改成一只可爱的小猫站在羽毛上，羽毛上写着汉字`译`
 
+### 10/14
+
+- pdf文件翻译的输出排版和输入排版相差很大，请改善（也许可以使用更成熟的pdf库？，我不知道有没有），不要怕麻烦就偷工减料。
+
 ## TODO
 - 取消后再翻译可能有问题
 

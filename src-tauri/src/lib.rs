@@ -2,6 +2,7 @@ mod ai;
 mod files;
 mod jobs;
 mod models;
+mod pdf;
 mod scheduler;
 mod server;
 mod store;
