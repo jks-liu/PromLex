@@ -11,8 +11,8 @@ use printpdf::{
 };
 use quick_xml::{
     escape::{escape, unescape},
-    events::{BytesText, Event},
-    Reader, Writer,
+    events::Event,
+    Reader,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -1061,6 +1061,13 @@ fn render_translated_pdf(
                 .to_string(),
         ));
     }
+    if blocks
+        .iter()
+        .zip(translated)
+        .all(|(block, text)| block.text == *text)
+    {
+        return Ok(source.to_vec());
+    }
     let mut embedded = HashMap::new();
     let mut source_fonts = Vec::new();
     for (block, text) in blocks.iter().zip(translated) {
@@ -1662,10 +1669,14 @@ fn extract_summary_text(filename: &str, bytes: &[u8], maximum: usize) -> Result<
                 }
                 let (block, text_tag) = if extension == "docx" && name.starts_with("word/") {
                     (b"w:p".as_slice(), b"w:t".as_slice())
-                } else if extension == "pptx" && name.starts_with("ppt/slides/") {
+                } else if (extension == "pptx" && name.starts_with("ppt/"))
+                    || (extension == "xlsx" && name.starts_with("xl/drawings/"))
+                {
                     (b"a:p".as_slice(), b"a:t".as_slice())
                 } else if extension == "xlsx" && name == "xl/sharedStrings.xml" {
                     (b"si".as_slice(), b"t".as_slice())
+                } else if extension == "xlsx" && name.starts_with("xl/worksheets/") {
+                    (b"is".as_slice(), b"t".as_slice())
                 } else {
                     continue;
                 };
@@ -1952,7 +1963,13 @@ async fn translate_fragments(
             FileError::Message("Selected AI provider does not exist or is disabled".to_string())
         })?;
     let maximum = (provider.context_size / 4).max(256);
-    let maximum_segments = provider.max_segments.max(1);
+    // Without a template, send raw segments individually so batch formatting
+    // instructions cannot silently add a translation prompt of their own.
+    let maximum_segments = if options.prompt_id.as_deref().is_none_or(str::is_empty) {
+        1
+    } else {
+        provider.max_segments.max(1)
+    };
     let max_concurrent = provider.max_concurrent.max(1);
     let file_concurrent = if provider.text_translation_model && max_concurrent > 1 {
         max_concurrent - 1
@@ -1963,7 +1980,7 @@ async fn translate_fragments(
     let mut pending = Vec::new();
     for source in fragments {
         let (_, content, _) = surrounding_whitespace(&source);
-        if content.is_empty() {
+        if !needs_translation(content) {
             counts.skipped += 1;
             planned.push(PlannedFragment {
                 source,
@@ -2487,7 +2504,22 @@ async fn translate_office(
                 )
                 .await?
             }
-            OfficeKind::PowerPoint if name.starts_with("ppt/slides/") && name.ends_with(".xml") => {
+            OfficeKind::PowerPoint if name.starts_with("ppt/") && name.ends_with(".xml") => {
+                translate_xml_document(
+                    store,
+                    scheduler,
+                    &contents,
+                    options,
+                    output_mode,
+                    b"a:p",
+                    b"a:t",
+                    counts,
+                    progress,
+                    state,
+                )
+                .await?
+            }
+            OfficeKind::Excel if name.starts_with("xl/drawings/") && name.ends_with(".xml") => {
                 translate_xml_document(
                     store,
                     scheduler,
@@ -2563,6 +2595,21 @@ async fn translate_office(
     Ok(output.finish()?.into_inner())
 }
 
+fn needs_translation(text: &str) -> bool {
+    let text = text.trim();
+    if !text.chars().any(char::is_alphabetic) {
+        return false;
+    }
+    // Single Latin letters are typically labels, variables or column names.
+    // Keep single ideographs and words in other scripts eligible for translation.
+    let mut letters = text.chars().filter(|c| c.is_alphabetic());
+    if letters.next().is_some_and(|c| c.is_ascii_alphabetic()) && letters.next().is_none() {
+        return false;
+    }
+    !(text.split_whitespace().count() == 1
+        && (text.starts_with("https://") || text.starts_with("http://")))
+}
+
 fn is_office_image(kind: OfficeKind, name: &str) -> bool {
     let media_prefix = match kind {
         OfficeKind::Word => "word/media/",
@@ -2596,10 +2643,8 @@ fn unpack_office(bytes: &[u8]) -> Result<Vec<(String, bool, Vec<u8>)>, FileError
 }
 
 struct XmlBlock {
-    start: usize,
-    end: usize,
-    original: Vec<u8>,
     text: String,
+    ranges: Vec<std::ops::Range<usize>>,
 }
 
 fn extract_xml_blocks(
@@ -2610,39 +2655,43 @@ fn extract_xml_blocks(
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
-    let mut block_start: Option<usize> = None;
-    let mut depth = 0usize;
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<XmlBlock> = Vec::new();
+    let mut stack = Vec::new();
+    let mut inside_text = false;
+    // Word can contain both WordprocessingML and DrawingML text boxes.
+    let is_block = |name: &[u8]| name == block_tag || (block_tag == b"w:p" && name == b"a:p");
+    let is_text = |name: &[u8]| name == text_tag || (text_tag == b"w:t" && name == b"a:t");
     loop {
-        let before = usize::try_from(reader.buffer_position())
-            .map_err(|_| FileError::Message("Document XML exceeds supported size".to_string()))?;
-        let event = reader.read_event_into(&mut buffer)?;
-        match &event {
-            Event::Start(start) if start.name().as_ref() == block_tag => {
-                if block_start.is_none() {
-                    block_start = Some(before);
-                    depth = 1;
-                } else {
-                    depth += 1;
-                }
+        let before = reader.buffer_position() as usize;
+        match reader.read_event_into(&mut buffer)? {
+            Event::Start(start) if is_block(start.name().as_ref()) => {
+                stack.push(blocks.len());
+                blocks.push(XmlBlock {
+                    text: String::new(),
+                    ranges: Vec::new(),
+                });
             }
-            Event::Start(_) if block_start.is_some() => depth += 1,
-            Event::End(end) if block_start.is_some() => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 && end.name().as_ref() == block_tag {
-                    let end_position = usize::try_from(reader.buffer_position()).map_err(|_| {
-                        FileError::Message("Document XML exceeds supported size".to_string())
-                    })?;
-                    let start = block_start.take().expect("block exists when depth is zero");
-                    let original = bytes[start..end_position].to_vec();
-                    let text = xml_text(&original, text_tag)?;
-                    blocks.push(XmlBlock {
-                        start,
-                        end: end_position,
-                        original,
-                        text,
-                    });
-                }
+            Event::End(end) if is_block(end.name().as_ref()) => {
+                stack.pop();
+            }
+            Event::Start(start) if is_text(start.name().as_ref()) => inside_text = true,
+            Event::End(end) if is_text(end.name().as_ref()) => inside_text = false,
+            Event::Text(text) if inside_text && !stack.is_empty() => {
+                let raw = std::str::from_utf8(text.as_ref())
+                    .map_err(|error| FileError::Message(error.to_string()))?;
+                let block = &mut blocks[*stack.last().unwrap()];
+                block.text.push_str(
+                    &unescape(raw).map_err(|error| FileError::Message(error.to_string()))?,
+                );
+                block.ranges.push(before..reader.buffer_position() as usize);
+            }
+            Event::CData(text) if inside_text && !stack.is_empty() => {
+                let block = &mut blocks[*stack.last().unwrap()];
+                block.text.push_str(
+                    std::str::from_utf8(text.as_ref())
+                        .map_err(|error| FileError::Message(error.to_string()))?,
+                );
+                block.ranges.push(before..reader.buffer_position() as usize);
             }
             Event::Eof => break,
             _ => {}
@@ -2650,6 +2699,35 @@ fn extract_xml_blocks(
         buffer.clear();
     }
     Ok(blocks)
+}
+
+fn replace_xml_blocks(bytes: &[u8], blocks: &[XmlBlock], translations: &[String]) -> Vec<u8> {
+    let mut edits = Vec::new();
+    for (block, translated) in blocks.iter().zip(translations) {
+        if block.text == *translated {
+            continue;
+        }
+        for (index, range) in block.ranges.iter().enumerate() {
+            edits.push((
+                range.clone(),
+                if index == 0 {
+                    escape(translated).into_owned()
+                } else {
+                    String::new()
+                },
+            ));
+        }
+    }
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut cursor = 0;
+    for (range, text) in edits {
+        output.extend_from_slice(&bytes[cursor..range.start]);
+        output.extend_from_slice(text.as_bytes());
+        cursor = range.end;
+    }
+    output.extend_from_slice(&bytes[cursor..]);
+    output
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2681,77 +2759,7 @@ async fn translate_xml_document(
         state,
     )
     .await?;
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut last_copy = 0;
-    for (block, translated) in blocks.iter().zip(translations) {
-        output.extend_from_slice(&bytes[last_copy..block.start]);
-        if block.text.trim().is_empty() {
-            output.extend_from_slice(&block.original);
-        } else {
-            output.extend_from_slice(&replace_xml_text(&block.original, text_tag, &translated)?);
-        }
-        last_copy = block.end;
-    }
-    output.extend_from_slice(&bytes[last_copy..]);
-    Ok(output)
-}
-
-fn xml_text(xml: &[u8], text_tag: &[u8]) -> Result<String, FileError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
-    let mut output = String::new();
-    let mut inside = false;
-    loop {
-        match reader.read_event_into(&mut buffer)? {
-            Event::Start(start) if start.name().as_ref() == text_tag => inside = true,
-            Event::End(end) if end.name().as_ref() == text_tag => inside = false,
-            Event::Text(text) if inside => {
-                let raw = std::str::from_utf8(text.as_ref()).map_err(|_| {
-                    FileError::Message("Document XML contains invalid UTF-8 text".to_string())
-                })?;
-                output.push_str(
-                    &unescape(raw).map_err(|error| FileError::Message(error.to_string()))?,
-                );
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buffer.clear();
-    }
-    Ok(output)
-}
-
-fn replace_xml_text(xml: &[u8], text_tag: &[u8], translated: &str) -> Result<Vec<u8>, FileError> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(false);
-    let mut writer = Writer::new(Vec::with_capacity(xml.len()));
-    let mut buffer = Vec::new();
-    let mut inside = false;
-    let mut wrote_translation = false;
-    loop {
-        let event = reader.read_event_into(&mut buffer)?;
-        match event {
-            Event::Start(start) if start.name().as_ref() == text_tag => {
-                inside = true;
-                writer.write_event(Event::Start(start.into_owned()))?;
-            }
-            Event::End(end) if end.name().as_ref() == text_tag => {
-                inside = false;
-                writer.write_event(Event::End(end.into_owned()))?;
-            }
-            Event::Text(_) if inside => {
-                if !wrote_translation {
-                    writer.write_event(Event::Text(BytesText::from_escaped(escape(translated))))?;
-                    wrote_translation = true;
-                }
-            }
-            Event::Eof => break,
-            other => writer.write_event(other.into_owned())?,
-        }
-        buffer.clear();
-    }
-    Ok(writer.into_inner())
+    Ok(replace_xml_blocks(bytes, &blocks, &translations))
 }
 
 fn translated_filename(filename: &str) -> String {
@@ -2778,8 +2786,8 @@ mod tests {
     use super::{
         load_pdf_fonts, make_batches, output_filename, output_media_type, parse_pdf,
         partial_batch_item_count, pdf_page_rotations, pdf_text_blocks, render_fragment,
-        render_translated_pdf, replace_xml_text, split_chunks, surrounding_whitespace,
-        wrap_pdf_text, PdfFont, PendingPart,
+        render_translated_pdf, split_chunks, surrounding_whitespace, wrap_pdf_text, PdfFont,
+        PendingPart,
     };
     use crate::{ai::SEGMENT_SEPARATOR, models::FileOutputMode};
     use printpdf::{
@@ -2855,14 +2863,76 @@ mod tests {
     fn office_text_is_extracted_and_replaced_without_losing_runs() {
         let paragraph = br#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Hello </w:t></w:r><w:r><w:t>world &amp; team</w:t></w:r></w:p>"#;
         assert_eq!(
-            super::xml_text(paragraph, b"w:t").unwrap(),
+            super::extract_xml_blocks(paragraph, b"w:p", b"w:t").unwrap()[0].text,
             "Hello world & team"
         );
 
-        let translated = replace_xml_text(paragraph, b"w:t", "你好，团队").unwrap();
-        let translated_text = super::xml_text(&translated, b"w:t").unwrap();
+        let blocks = super::extract_xml_blocks(paragraph, b"w:p", b"w:t").unwrap();
+        let translated = super::replace_xml_blocks(paragraph, &blocks, &["你好，团队".to_string()]);
+        let translated_text = super::extract_xml_blocks(&translated, b"w:p", b"w:t")
+            .unwrap()
+            .remove(0)
+            .text;
         assert_eq!(translated_text, "你好，团队");
         assert!(String::from_utf8(translated).unwrap().contains("<w:b"));
+    }
+
+    #[test]
+    fn obvious_non_language_fragments_are_skipped() {
+        for text in [
+            "",
+            "  ",
+            "a",
+            "Z.",
+            "(B)",
+            "123.45%",
+            "—…！？",
+            "⚠ ★ →",
+            "https://example.com",
+        ] {
+            assert!(!super::needs_translation(text), "{text}");
+        }
+        for text in [
+            "中",
+            "是",
+            "あ",
+            "Yes",
+            "NASA",
+            "第1章",
+            "https://example.com is a website",
+        ] {
+            assert!(super::needs_translation(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn nested_office_textboxes_keep_their_text_separate() {
+        let xml = br#"<w:p><w:r><w:t>Outer</w:t><w:drawing><w:txbxContent><w:p><w:r><w:t>Box &amp; text</w:t></w:r></w:p></w:txbxContent><a:p><a:r><a:t>Drawing</a:t></a:r></a:p></w:drawing></w:r><w:r><w:t> tail</w:t></w:r></w:p>"#;
+        let blocks = super::extract_xml_blocks(xml, b"w:p", b"w:t").unwrap();
+        assert_eq!(
+            blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            ["Outer tail", "Box & text", "Drawing"]
+        );
+        let translations = vec!["外层".into(), "文本框".into(), "绘图".into()];
+        let output = super::replace_xml_blocks(xml, &blocks, &translations);
+        let result = super::extract_xml_blocks(&output, b"w:p", b"w:t").unwrap();
+        assert_eq!(
+            result.iter().map(|b| b.text.clone()).collect::<Vec<_>>(),
+            translations
+        );
+        assert_eq!(
+            super::replace_xml_blocks(
+                xml,
+                &blocks,
+                &blocks.iter().map(|b| b.text.clone()).collect::<Vec<_>>()
+            ),
+            xml
+        );
+        let drawing = br#"<xdr:wsDr><a:p><a:r><a:t>Excel box</a:t></a:r></a:p></xdr:wsDr>"#;
+        assert_eq!(
+            super::extract_xml_blocks(drawing, b"a:p", b"a:t").unwrap()[0].text,
+            "Excel box"
+        );
     }
 
     #[test]
@@ -2918,6 +2988,21 @@ mod tests {
     fn pdf_output_keeps_its_file_type() {
         assert_eq!(output_filename("guide.PDF"), "guide-translated.PDF");
         assert_eq!(output_media_type("guide.PDF"), "application/pdf");
+    }
+
+    #[test]
+    fn unchanged_pdf_is_returned_byte_for_byte() {
+        let source = source_pdf();
+        let mut document = parse_pdf(&crate::pdf::extraction_copy(&source).unwrap()).unwrap();
+        let blocks = pdf_text_blocks(&document);
+        let translations = blocks
+            .iter()
+            .map(|block| block.text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            render_translated_pdf(&mut document, &blocks, &translations, &source).unwrap(),
+            source
+        );
     }
 
     #[test]

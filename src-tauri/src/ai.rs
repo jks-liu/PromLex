@@ -190,11 +190,17 @@ pub async fn translate_image(
             "Selected provider does not support image input/output".to_string(),
         ));
     }
-    let mut prompt = format!(
+    let prompt = if request.prompt_id.as_deref().is_none_or(str::is_empty) {
+        request.additional_prompt.trim().to_string()
+    } else {
+        let mut instruction = format!(
         "Translate every readable text element in this image from {} to {}. Preserve all non-text pixels, composition, layout, visual style, font scale and colors. Replace the original text with the translation and return the edited image only.",
         request.source_language, request.target_language
-    );
-    append_language_description(&mut prompt, request);
+        );
+        instruction.push_str("\n\n");
+        instruction.push_str(&build_messages(&data, request).0);
+        instruction
+    };
     let mime = mime_guess::from_path(filename)
         .first_or_octet_stream()
         .to_string();
@@ -462,6 +468,12 @@ fn append_language_description(prompt: &mut String, request: &TranslateRequest) 
 }
 
 fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String) {
+    if request.prompt_id.as_deref().is_none_or(str::is_empty) {
+        return (
+            request.additional_prompt.trim().to_string(),
+            request.text.clone(),
+        );
+    }
     let glossary = data
         .glossaries
         .iter()
@@ -1456,6 +1468,32 @@ mod tests {
         assert!(system.contains("Translate faithfully"));
         assert!(system.ends_with("Additional instructions:\nUse a friendly tone."));
         assert_eq!(user, "Text to translate:\nHello");
+    }
+
+    #[test]
+    fn no_template_uses_only_user_instructions_and_raw_input() {
+        let mut request = TranslateRequest {
+            text: "Hello".into(),
+            source_language: "English".into(),
+            target_language: "Martian".into(),
+            provider_id: "provider".into(),
+            prompt_id: None,
+            additional_prompt: "My instructions".into(),
+            glossary_ids: vec![],
+            reasoning_effort: "none".into(),
+            summarize: true,
+            context_summary: Some("Generated context".into()),
+        };
+        assert_eq!(
+            build_messages(&AppData::default(), &request),
+            ("My instructions".into(), "Hello".into())
+        );
+        request.prompt_id = Some(String::new());
+        request.additional_prompt.clear();
+        assert_eq!(
+            build_messages(&AppData::default(), &request),
+            (String::new(), "Hello".into())
+        );
     }
 
     #[test]

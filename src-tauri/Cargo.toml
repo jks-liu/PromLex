@@ -1,6 +1,6 @@
 [package]
 name = "promlex"
-version = "1.0.1"
+version = "1.0.3"
 description = "AI translation studio for text and documents"
 authors = ["PromLex contributors"]
 edition = "2021"

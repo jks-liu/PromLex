@@ -14,7 +14,7 @@ for (const viewport of [
     await expect(page.locator(".app-shell")).toBeVisible();
     await expect(page).toHaveTitle("PromLex");
     await expect(page.locator(".brand-row strong")).toHaveText("PromLex");
-    expect(await page.locator(".brand-mark").evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
+    await expect.poll(() => page.locator(".brand-mark").evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0)).toBe(true);
     await expect(page).toHaveScreenshot(`${viewport.name}.png`, { animations: "disabled", fullPage: false });
     expect(browserErrors).toEqual([]);
 
@@ -67,4 +67,35 @@ test("provider enabled checkbox has a visible label", async ({ page }) => {
   const enabled = page.getByRole("checkbox", { name: "Enabled", exact: true });
   await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
   await expect(enabled).toBeChecked();
+});
+
+
+test("translation action sits above the source editor", async ({ page }) => {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  const button = page.locator(".translate-page .action-row button");
+  const editor = page.locator(".translate-page .editor-panel textarea");
+  await expect(button).toBeVisible();
+  const actionBox = await button.boundingBox();
+  const editorBox = await editor.boundingBox();
+  expect(actionBox!.y + actionBox!.height).toBeLessThanOrEqual(editorBox!.y);
+});
+
+test("browser save as allows renaming the translated download", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("tranova-language", "en");
+    Object.defineProperty(window, "showSaveFilePicker", { value: undefined, configurable: true });
+  });
+  await page.route("**/api/file-jobs", (route) => route.fulfill({ json: [{
+    id: "save-as", filename: "source.txt", resultFilename: "source-translated.txt",
+    state: "completed", stage: "completed", outputMode: "translated", failedBatches: [],
+    totalSegments: 1, translatedSegments: 1, totalBatches: 1, completedBatches: 1,
+    failedSegments: 0, skippedSegments: 0,
+  }] }));
+  await page.route("**/api/file-jobs/save-as/download", (route) => route.fulfill({ body: "Translated content", contentType: "text/plain" }));
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  page.once("dialog", (dialog) => dialog.accept("renamed.txt"));
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save as…", exact: true }).click();
+  expect((await download).suggestedFilename()).toBe("renamed.txt");
 });

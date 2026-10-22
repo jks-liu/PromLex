@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, isDesktopApp } from "../api";
 import { TranslationOptions, type TranslationOptionsValue } from "../components/TranslationOptions";
-import { downloadBlob } from "../utils";
+import { downloadBlob, saveBlobAs } from "../utils";
 import type { BootstrapData, FileJobStatus, FileOutputMode } from "../types";
 
 export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: () => Promise<void> }) {
@@ -38,19 +38,23 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
     }
   }, []);
 
-  const downloadJob = useCallback(async (job: FileJobStatus): Promise<boolean> => {
+  const downloadJob = useCallback(async (job: FileJobStatus, saveAs = false): Promise<boolean> => {
     if (job.state !== "completed") return false;
     setDownloadingId(job.id);
     setError("");
     try {
       if (isDesktopApp()) {
-        const destination = await resolveDownloadPath(job, data.settings, t("files.download"));
+        const destination = await resolveDownloadPath(job, data.settings, t(saveAs ? "files.saveAs" : "files.download"), saveAs);
         if (!destination) return false;
         const saved = await api.saveFileJob(job.id, destination);
         setJobs((current) => current.map((item) => item.id === saved.id ? saved : item));
         await onReload();
       } else {
-        downloadBlob(job.resultFilename, await api.downloadFileJob(job.id));
+        if (saveAs) {
+          if (!await saveBlobAs(job.resultFilename, () => api.downloadFileJob(job.id), t("files.saveAsFilename"))) return false;
+        } else {
+          downloadBlob(job.resultFilename, await api.downloadFileJob(job.id));
+        }
         setBrowserDownloadedIds((current) => new Set(current).add(job.id));
       }
       autoDownloadedIds.current.add(job.id);
@@ -308,6 +312,9 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
                         {job.downloadedPath && <span className="download-path" title={job.downloadedPath}>{t("files.savedTo", { path: job.downloadedPath })}</span>}
                       </div>
                       <div className="download-actions">
+                        <button className="secondary-button" onClick={() => void downloadJob(job, true)} disabled={downloadingId === job.id}>
+                          <Download size={18} /> {t("files.saveAs")}
+                        </button>
                         <button className="secondary-button" onClick={() => void downloadJob(job)} disabled={downloadingId === job.id}>
                           <Download size={18} /> {downloadingId === job.id ? t("files.downloading") : t("files.download")}
                         </button>
@@ -381,6 +388,7 @@ async function resolveDownloadPath(
   job: FileJobStatus,
   settings: BootstrapData["settings"],
   title: string,
+  saveAs = false,
 ): Promise<string | null> {
   const { dirname, downloadDir, join } = await import("@tauri-apps/api/path");
   let directory = "";
@@ -392,7 +400,7 @@ async function resolveDownloadPath(
     directory = await downloadDir();
   }
   if (!directory) directory = await downloadDir();
-  if (!settings.askDownloadLocation) return join(directory, job.resultFilename);
+  if (!saveAs && !settings.askDownloadLocation) return join(directory, job.resultFilename);
 
   const defaultDirectory = settings.lastDownloadDirectory || directory;
   const { save } = await import("@tauri-apps/plugin-dialog");

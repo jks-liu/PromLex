@@ -68,6 +68,11 @@ export function TranslatePage({ data, onReload }: { data: BootstrapData; onReloa
         <div><h1>{t("translate.title")}</h1><p>{t("translate.subtitle")}</p></div>
       </div>
       <TranslationOptions value={options} onChange={changeOptions} providers={data.providers} prompts={data.prompts} glossaries={data.glossaries} />
+      <div className="action-row">
+        <button className="primary-button" onClick={translate} disabled={working || !source.trim() || !options.providerId}>
+          <Languages size={18} /> {working ? t("translate.working") : t("translate.action")}
+        </button>
+      </div>
       <div className="editor-grid">
         <section className="editor-panel">
           <header><strong>{t("translate.source")}</strong><span>{t("translate.characters", { count: source.length })}</span></header>
@@ -84,11 +89,6 @@ export function TranslatePage({ data, onReload }: { data: BootstrapData; onReloa
         </section>
       </div>
       {error && <div className="alert error-alert">{error}</div>}
-      <div className="action-row">
-        <button className="primary-button" onClick={translate} disabled={working || !source.trim() || !options.providerId}>
-          <Languages size={18} /> {working ? t("translate.working") : t("translate.action")}
-        </button>
-      </div>
     </section>
   );
 }

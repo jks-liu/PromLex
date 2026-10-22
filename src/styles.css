@@ -36,6 +36,7 @@ h1 { font-size: 26px; line-height: 1.2; margin-bottom: 7px; font-weight: 700; }
 .page-heading p { margin-bottom: 0; color: #667580; font-size: 14px; line-height: 1.5; }
 .heading-actions, .action-row, .list-actions, .modal-footer { display: flex; align-items: center; gap: 9px; }
 .action-row { justify-content: flex-end; margin-top: 20px; }
+.translate-page > .action-row { margin: 0 0 12px; }
 
 .primary-button, .secondary-button, .icon-text-button, .text-button { border: 1px solid transparent; border-radius: 5px; min-height: 38px; padding: 8px 13px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 600; }
 .primary-button { background: #1c7c67; color: #fff; }

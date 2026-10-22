@@ -249,6 +249,34 @@ fn expand_forms(
                             {
                                 output.push(Operation::new("cm", matrix.clone()));
                             }
+                            // A Form's BBox is an implicit clipping path. Inlining
+                            // its stream must retain that clip in the same space
+                            // as the Form matrix, scoped by q/Q.
+                            if let Ok(bounds) = stream.dict.get(b"BBox").and_then(Object::as_array)
+                            {
+                                if bounds.len() == 4 {
+                                    let coordinates = bounds
+                                        .iter()
+                                        .map(Object::as_float)
+                                        .collect::<Result<Vec<_>, _>>()
+                                        .map_err(error)?;
+                                    let (x0, y0, x1, y1) = (
+                                        coordinates[0],
+                                        coordinates[1],
+                                        coordinates[2],
+                                        coordinates[3],
+                                    );
+                                    output.extend([
+                                        Operation::new("m", vec![x0.into(), y0.into()]),
+                                        Operation::new("l", vec![x1.into(), y0.into()]),
+                                        Operation::new("l", vec![x1.into(), y1.into()]),
+                                        Operation::new("l", vec![x0.into(), y1.into()]),
+                                        Operation::new("h", vec![]),
+                                        Operation::new("W", vec![]),
+                                        Operation::new("n", vec![]),
+                                    ]);
+                                }
+                            }
                             output.extend(expand_forms(
                                 document,
                                 &child.operations,
@@ -581,6 +609,40 @@ mod tests {
             && run[1].operands == show.operands));
         let extracted = filter_text(edited, true);
         assert!(!extracted.iter().any(|operation| operation.operator == "Tj"));
+    }
+
+    #[test]
+    fn expanded_forms_keep_their_bounds_inside_their_transform() {
+        let mut document = Document::with_version("1.7");
+        let form = document.add_object(Stream::new(
+            dictionary! {
+                "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 100.into(), 50.into()],
+                "Matrix" => vec![1.into(), 0.into(), 0.into(), 1.into(), 20.into(), 30.into()],
+            },
+            Content {
+                operations: vec![Operation::new("Tj", vec![Object::string_literal("Label")])],
+            }
+            .encode()
+            .unwrap(),
+        ));
+        let scope = dictionary! { "XObject" => dictionary! { "F" => form } };
+        let output = super::expand_forms(
+            &document,
+            &[Operation::new("Do", vec![Object::Name(b"F".to_vec())])],
+            &scope,
+            &mut lopdf::Dictionary::new(),
+            &mut 0,
+            &mut Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            output
+                .iter()
+                .map(|op| op.operator.as_str())
+                .collect::<Vec<_>>(),
+            ["q", "cm", "m", "l", "l", "l", "h", "W", "n", "Tj", "Q"]
+        );
+        assert_eq!(output[4].operands, vec![100.0_f32.into(), 50.0_f32.into()]);
     }
 
     #[test]
