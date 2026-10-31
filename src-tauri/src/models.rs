@@ -401,6 +401,8 @@ pub struct FileJobStatus {
     pub skipped_segments: usize,
     pub total_batches: usize,
     pub completed_batches: usize,
+    #[serde(default)]
+    pub preserved_pdf_pages: Vec<usize>,
     pub failed_batches: Vec<FileBatchFailure>,
     pub streaming_batch: Option<usize>,
     pub streaming_segments: usize,

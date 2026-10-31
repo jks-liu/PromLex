@@ -122,6 +122,7 @@ export interface FileJobStatus {
   totalBatches: number;
   completedBatches: number;
   failedBatches: FileBatchFailure[];
+  preservedPdfPages?: number[];
   streamingBatch?: number;
   streamingSegments: number;
   streamingBatchSegments: number;

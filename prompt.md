@@ -163,6 +163,16 @@ Unable to summarize document: Responses API returned no output text
 - 继续优化pdf文件的翻译，pdf操作若有的话可以使用成熟、还在维护且广泛使用的库
 - 文本翻译的翻译按钮放到文本上方，优化用户体验
 
+### 2026年10月28日
+
+翻译pdf文件有时会有如下错误：
+```
+The file translation failed before a result was created.
+
+Translated PDF text cannot fit its original layout at a readable font size (7.7pt). Try translation-only output or a shorter translation.
+```
+尝试修复，即使不能修复，出错的地方不翻译就行（在UI中用一个warning文本提示用户），直接失败体验太差
+
 ## TODO
 - 取消后再翻译可能有问题
 

@@ -99,3 +99,19 @@ test("browser save as allows renaming the translated download", async ({ page })
   await page.getByRole("button", { name: "Save as…", exact: true }).click();
   expect((await download).suggestedFilename()).toBe("renamed.txt");
 });
+
+
+test("PDF layout warning keeps the completed download available", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  await page.route("**/api/file-jobs", (route) => route.fulfill({ json: [{
+    id: "pdf-overflow", filename: "source.pdf", resultFilename: "source-translated.pdf",
+    state: "completed", stage: "completed", outputMode: "translated", failedBatches: [],
+    totalSegments: 2, translatedSegments: 2, totalBatches: 1, completedBatches: 1,
+    failedSegments: 0, skippedSegments: 0, preservedPdfPages: [1, 3],
+  }] }));
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("PDF pages 1, 3");
+  await expect(page.getByRole("button", { name: "Download translation", exact: true })).toBeEnabled();
+  await expect(page.getByText("Completed", { exact: true }).first()).toBeVisible();
+});

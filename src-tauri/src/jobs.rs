@@ -51,6 +51,7 @@ impl FileJobManager {
             skipped_segments: 0,
             total_batches: 0,
             completed_batches: 0,
+            preserved_pdf_pages: Vec::new(),
             failed_batches: Vec::new(),
             streaming_batch: None,
             streaming_segments: 0,
@@ -139,6 +140,7 @@ impl FileJobManager {
             record.status.total_batches = result.total_batches;
             record.status.completed_batches = result.total_batches;
             record.status.failed_batches = result.failed_batches;
+            record.status.preserved_pdf_pages = result.preserved_pdf_pages;
             record.status.streaming_batch = None;
             record.status.streaming_segments = 0;
             record.status.streaming_batch_segments = 0;
@@ -171,6 +173,7 @@ impl FileJobManager {
         record.status.state = FileJobState::Processing;
         record.status.stage = "translating".to_string();
         record.status.error = None;
+        record.status.preserved_pdf_pages.clear();
         record.status.streaming_batch = None;
         record.status.streaming_segments = 0;
         record.status.streaming_batch_segments = 0;
@@ -367,6 +370,7 @@ mod tests {
                 total_segments: 1,
                 total_batches: 1,
                 failed_segments: 0,
+                preserved_pdf_pages: Vec::new(),
                 failed_batches: Vec::new(),
                 retry_context: None,
             },

@@ -481,7 +481,11 @@ fn strip_forms(
 
 /// Graft generated translation forms onto the source pages. All original page
 /// dictionaries, annotations, outlines, metadata, images and artwork survive.
-pub(crate) fn apply_translation(source: &[u8], overlay: &[u8]) -> Result<Vec<u8>, FileError> {
+pub(crate) fn apply_translation(
+    source: &[u8],
+    overlay: &[u8],
+    preserved_pages: &BTreeSet<usize>,
+) -> Result<Vec<u8>, FileError> {
     let mut document = Document::load_mem(source).map_err(error)?;
     let mut overlay = Document::load_mem(overlay).map_err(error)?;
     overlay.renumber_objects_with(document.max_id + 1);
@@ -500,8 +504,38 @@ pub(crate) fn apply_translation(source: &[u8], overlay: &[u8]) -> Result<Vec<u8>
     }
     document.max_id = document.max_id.max(overlay.max_id);
     document.objects.extend(overlay.objects);
+    // Keep a separate object graph for fallback pages: Form XObjects may be
+    // shared with pages whose text is stripped below.
+    let originals = if preserved_pages.is_empty() {
+        None
+    } else {
+        let mut original = Document::load_mem(source).map_err(error)?;
+        original.renumber_objects_with(document.max_id + 1);
+        let pages = original.get_pages().into_values().collect::<Vec<_>>();
+        let mut entries = HashMap::new();
+        for index in preserved_pages {
+            let page = pages[*index];
+            entries.insert(
+                *index,
+                (resources(&original, page)?, original.get_page_content(page)),
+            );
+        }
+        document.max_id = document.max_id.max(original.max_id);
+        document.objects.extend(original.objects);
+        Some(entries)
+    };
     let mut visited = BTreeSet::new();
-    for (page, (mut dictionary, data)) in source_pages.into_iter().zip(forms) {
+    for (index, (page, (mut dictionary, data))) in source_pages.into_iter().zip(forms).enumerate() {
+        if let Some((scope, content)) = originals.as_ref().and_then(|entries| entries.get(&index)) {
+            document
+                .change_page_content(page, content.clone())
+                .map_err(error)?;
+            document
+                .get_dictionary_mut(page)
+                .map_err(error)?
+                .set("Resources", scope.clone());
+            continue;
+        }
         let mut scope = resources(&document, page)?;
         strip_forms(&mut document, &scope, &mut visited)?;
         dictionary.set("BBox", inherited(&document, page, b"MediaBox")?);

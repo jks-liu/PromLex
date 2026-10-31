@@ -47,6 +47,10 @@ pub enum FileError {
     Json(#[from] serde_json::Error),
     #[error("File translation was cancelled")]
     Cancelled,
+    #[error(
+        "Translated PDF text cannot fit its original layout at a readable font size ({0:.1}pt)"
+    )]
+    PdfLayoutOverflow(f32),
 }
 
 pub type ProgressCallback = Arc<dyn Fn(FileProgress) + Send + Sync>;
@@ -63,6 +67,7 @@ pub struct FileTranslationResult {
     pub failed_segments: usize,
     pub failed_batches: Vec<FileBatchFailure>,
     pub retry_context: Option<FileRetryContext>,
+    pub preserved_pdf_pages: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +120,7 @@ impl Default for BatchState {
 
 #[derive(Default)]
 struct Counts {
+    preserved_pdf_pages: Vec<usize>,
     translated: usize,
     failed: usize,
     skipped: usize,
@@ -382,6 +388,7 @@ async fn translate_file_with_cache(
         failed_segments: counts.failed,
         failed_batches: batch_state.failed_batches,
         retry_context,
+        preserved_pdf_pages: counts.preserved_pdf_pages,
     })
 }
 
@@ -530,7 +537,13 @@ async fn translate_pdf(
         state,
     )
     .await?;
-    render_translated_pdf(&mut document, &blocks, &translated, bytes)
+    render_translated_pdf_with_fallback(
+        &mut document,
+        &blocks,
+        &translated,
+        bytes,
+        &mut counts.preserved_pdf_pages,
+    )
 }
 
 const PDF_MIN_FONT_SIZE: f32 = 6.0;
@@ -1049,11 +1062,22 @@ fn pdf_bbox_union(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+#[cfg(test)]
 fn render_translated_pdf(
     document: &mut PdfDocument,
     blocks: &[PdfTextBlock],
     translated: &[String],
     source: &[u8],
+) -> Result<Vec<u8>, FileError> {
+    render_translated_pdf_with_fallback(document, blocks, translated, source, &mut Vec::new())
+}
+
+fn render_translated_pdf_with_fallback(
+    document: &mut PdfDocument,
+    blocks: &[PdfTextBlock],
+    translated: &[String],
+    source: &[u8],
+    preserved_pages: &mut Vec<usize>,
 ) -> Result<Vec<u8>, FileError> {
     if blocks.len() != translated.len() {
         return Err(FileError::Message(
@@ -1142,6 +1166,7 @@ fn render_translated_pdf(
     for page in &mut document.pages {
         page.ops.clear();
     }
+    let mut preserved = BTreeSet::new();
     for (((block, text), bbox), source_font) in
         blocks.iter().zip(translated).zip(layout).zip(source_fonts)
     {
@@ -1155,7 +1180,7 @@ fn render_translated_pdf(
         };
         let mut fitted = block.clone();
         fitted.bbox = bbox;
-        page.ops.extend(render_pdf_block(
+        match render_pdf_block(
             &fitted,
             text,
             page.media_box.height.0,
@@ -1163,7 +1188,17 @@ fn render_translated_pdf(
                 Some(id) => &embedded[&id],
                 None => &font_sets[&(block.style.bold, block.style.italic)],
             },
-        )?);
+        ) {
+            Ok(operations) => page.ops.extend(operations),
+            Err(FileError::PdfLayoutOverflow(_)) => {
+                preserved.insert(block.page_index);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    preserved_pages.extend(preserved.iter().map(|index| index + 1));
+    if preserved.len() == document.pages.len() {
+        return Ok(source.to_vec());
     }
 
     let mut warnings = Vec::new();
@@ -1174,7 +1209,7 @@ fn render_translated_pdf(
         },
         &mut warnings,
     );
-    let bytes = crate::pdf::apply_translation(source, &bytes)?;
+    let bytes = crate::pdf::apply_translation(source, &bytes, &preserved)?;
     if bytes.starts_with(b"%PDF-") {
         Ok(bytes)
     } else {
@@ -1362,9 +1397,7 @@ fn fit_pdf_text(
             return Ok((font_size, lines));
         }
         if font_size <= minimum {
-            return Err(FileError::Message(format!(
-                "Translated PDF text cannot fit its original layout at a readable font size ({minimum:.1}pt). Try translation-only output or a shorter translation."
-            )));
+            return Err(FileError::PdfLayoutOverflow(minimum));
         }
         font_size = (font_size - 0.25).max(minimum);
     }
@@ -2645,6 +2678,8 @@ fn unpack_office(bytes: &[u8]) -> Result<Vec<(String, bool, Vec<u8>)>, FileError
 struct XmlBlock {
     text: String,
     ranges: Vec<std::ops::Range<usize>>,
+    phonetic_ranges: Vec<std::ops::Range<usize>>,
+    spreadsheet: bool,
 }
 
 fn extract_xml_blocks(
@@ -2658,6 +2693,8 @@ fn extract_xml_blocks(
     let mut blocks: Vec<XmlBlock> = Vec::new();
     let mut stack = Vec::new();
     let mut inside_text = false;
+    let spreadsheet = matches!(block_tag, b"si" | b"is");
+    let mut phonetic_start = None;
     // Word can contain both WordprocessingML and DrawingML text boxes.
     let is_block = |name: &[u8]| name == block_tag || (block_tag == b"w:p" && name == b"a:p");
     let is_text = |name: &[u8]| name == text_tag || (text_tag == b"w:t" && name == b"a:t");
@@ -2669,12 +2706,35 @@ fn extract_xml_blocks(
                 blocks.push(XmlBlock {
                     text: String::new(),
                     ranges: Vec::new(),
+                    phonetic_ranges: Vec::new(),
+                    spreadsheet,
                 });
             }
             Event::End(end) if is_block(end.name().as_ref()) => {
                 stack.pop();
             }
-            Event::Start(start) if is_text(start.name().as_ref()) => inside_text = true,
+            Event::Start(start) if spreadsheet && start.local_name().as_ref() == b"rPh" => {
+                phonetic_start = Some(before);
+            }
+            Event::End(end) if spreadsheet && end.local_name().as_ref() == b"rPh" => {
+                if let (Some(start), Some(index)) = (phonetic_start.take(), stack.last()) {
+                    blocks[*index]
+                        .phonetic_ranges
+                        .push(start..reader.buffer_position() as usize);
+                }
+            }
+            Event::Empty(start)
+                if spreadsheet && matches!(start.local_name().as_ref(), b"rPh" | b"phoneticPr") =>
+            {
+                if let Some(index) = stack.last() {
+                    blocks[*index]
+                        .phonetic_ranges
+                        .push(before..reader.buffer_position() as usize);
+                }
+            }
+            Event::Start(start) if is_text(start.name().as_ref()) && phonetic_start.is_none() => {
+                inside_text = true
+            }
             Event::End(end) if is_text(end.name().as_ref()) => inside_text = false,
             Event::Text(text) if inside_text && !stack.is_empty() => {
                 let raw = std::str::from_utf8(text.as_ref())
@@ -2701,17 +2761,54 @@ fn extract_xml_blocks(
     Ok(blocks)
 }
 
+// SpreadsheetML uses _xHHHH_ escapes for characters XML 1.0 cannot store.
+// Escape literal escape sequences too, so Excel does not reinterpret AI text.
+fn spreadsheet_xml_text(text: &str) -> String {
+    let mut result = String::new();
+    for (index, character) in text.char_indices() {
+        let tail = &text.as_bytes()[index..];
+        if character == '_'
+            && tail.len() >= 7
+            && tail[1] == b'x'
+            && tail[2..6].iter().all(u8::is_ascii_hexdigit)
+            && tail[6] == b'_'
+        {
+            result.push_str("_x005F_");
+        } else if matches!(character, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}')
+        {
+            result.push_str(&format!("_x{:04X}_", character as u32));
+        } else {
+            result.push(character);
+        }
+    }
+    result
+}
+
 fn replace_xml_blocks(bytes: &[u8], blocks: &[XmlBlock], translations: &[String]) -> Vec<u8> {
     let mut edits = Vec::new();
     for (block, translated) in blocks.iter().zip(translations) {
         if block.text == *translated {
             continue;
         }
+        // Phonetic runs refer to character offsets in the original string.
+        // They must not be translated or retained after changing its length.
+        edits.extend(
+            block
+                .phonetic_ranges
+                .iter()
+                .cloned()
+                .map(|range| (range, String::new())),
+        );
+        let translated = if block.spreadsheet {
+            spreadsheet_xml_text(translated)
+        } else {
+            translated.chars().filter(|c| matches!(*c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')).collect()
+        };
         for (index, range) in block.ranges.iter().enumerate() {
             edits.push((
                 range.clone(),
                 if index == 0 {
-                    escape(translated).into_owned()
+                    escape(&translated).into_owned()
                 } else {
                     String::new()
                 },
@@ -3003,6 +3100,80 @@ mod tests {
             render_translated_pdf(&mut document, &blocks, &translations, &source).unwrap(),
             source
         );
+    }
+
+    #[test]
+    fn overflowing_pdf_preserves_original_page_and_translates_other_pages() {
+        let source = source_pdf();
+        let mut document = parse_pdf(&crate::pdf::extraction_copy(&source).unwrap()).unwrap();
+        let blocks = pdf_text_blocks(&document);
+        let translations = blocks
+            .iter()
+            .map(|block| {
+                if block.page_index == 0 {
+                    "Very long translation ".repeat(2000)
+                } else {
+                    "Translated second page".to_string()
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut preserved = Vec::new();
+        let output = super::render_translated_pdf_with_fallback(
+            &mut document,
+            &blocks,
+            &translations,
+            &source,
+            &mut preserved,
+        )
+        .unwrap();
+        assert_eq!(preserved, [1]);
+        let original = lopdf::Document::load_mem(&source).unwrap();
+        let result = lopdf::Document::load_mem(&output).unwrap();
+        assert_eq!(
+            lopdf::content::Content::decode(&original.get_page_content(original.get_pages()[&1]))
+                .unwrap()
+                .encode()
+                .unwrap(),
+            lopdf::content::Content::decode(&result.get_page_content(result.get_pages()[&1]))
+                .unwrap()
+                .encode()
+                .unwrap()
+        );
+        let text = parse_pdf(&crate::pdf::extraction_copy(&output).unwrap())
+            .unwrap()
+            .extract_text()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("Original first line"), "{text}");
+        assert!(text.contains("Translated second page"), "{text}");
+        assert!(!text.contains("Page two"), "{text}");
+    }
+
+    #[test]
+    fn spreadsheet_translation_removes_stale_phonetics_and_escapes_controls() {
+        for tag in [b"si".as_slice(), b"is".as_slice()] {
+            let xml = format!(
+                r#"<root><{0}><r><rPr><b/></rPr><t>Original</t></r><rPh sb="0" eb="8"><t>phonetic</t></rPh><phoneticPr fontId="1"/></{0}><{0}><t>Unchanged</t><rPh sb="0" eb="2"><t>hint</t></rPh></{0}></root>"#,
+                std::str::from_utf8(tag).unwrap()
+            );
+            let blocks = super::extract_xml_blocks(xml.as_bytes(), tag, b"t").unwrap();
+            assert_eq!(blocks[0].text, "Original");
+            let output = super::replace_xml_blocks(
+                xml.as_bytes(),
+                &blocks,
+                &["Short\u{1}&_x0041_".into(), "Unchanged".into()],
+            );
+            let output = String::from_utf8(output).unwrap();
+            assert!(
+                output.contains("Short_x0001_&amp;_x005F_x0041_"),
+                "{output}"
+            );
+            assert!(!output.contains("phonetic"), "{output}");
+            assert!(output.contains(r#"<rPh sb="0" eb="2"><t>hint</t></rPh>"#));
+            assert!(output.contains("<rPr><b/></rPr>"));
+        }
     }
 
     #[test]
