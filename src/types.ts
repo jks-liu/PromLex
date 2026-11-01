@@ -123,6 +123,10 @@ export interface FileJobStatus {
   completedBatches: number;
   failedBatches: FileBatchFailure[];
   preservedPdfPages?: number[];
+  archivePdfWarnings?: { filename: string; pages: number[] }[];
+  completedFiles?: CompletedFileStatus[];
+  outputDirectory?: string;
+  outputError?: string;
   streamingBatch?: number;
   streamingSegments: number;
   streamingBatchSegments: number;
@@ -133,6 +137,19 @@ export interface FileJobStatus {
   createdAt: string;
   sourcePath?: string;
   downloadedPath?: string;
+}
+
+export interface CompletedFileStatus {
+  id: number;
+  path: string;
+  revision: number;
+  resumed: boolean;
+  savedPath?: string;
+}
+
+export interface FileResumeInput {
+  archive?: File;
+  files?: { path: string; file: File }[];
 }
 
 export interface FileBatchFailure {

@@ -1,9 +1,11 @@
 import { Check, Clipboard, Languages } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { translateStream } from "../api";
 import { TranslationOptions, type TranslationOptionsValue } from "../components/TranslationOptions";
 import type { BootstrapData } from "../types";
+
+const MarkdownText = lazy(() => import("../components/MarkdownText"));
 
 export function TranslatePage({ data, onReload }: { data: BootstrapData; onReload: () => Promise<void> }) {
   const { t } = useTranslation();
@@ -14,6 +16,11 @@ export function TranslatePage({ data, onReload }: { data: BootstrapData; onReloa
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [renderMarkdown, setRenderMarkdown] = useState(() => localStorage.getItem("tranova-render-markdown") === "true");
+
+  useEffect(() => {
+    localStorage.setItem("tranova-render-markdown", String(renderMarkdown));
+  }, [renderMarkdown]);
 
   useEffect(() => {
     setOptions((current) => {
@@ -39,7 +46,7 @@ export function TranslatePage({ data, onReload }: { data: BootstrapData; onReloa
     try {
       setResult("");
       const response = await translateStream(
-        { text: source, ...options, promptId: options.promptId || undefined },
+        { text: source, ...options, sourceLanguage: "auto", promptId: options.promptId || undefined },
         (text) => setResult(text),
       );
       setResult(response.translatedText);
@@ -63,29 +70,30 @@ export function TranslatePage({ data, onReload }: { data: BootstrapData; onReloa
   };
 
   return (
-    <section className="page translate-page">
-      <div className="page-heading">
-        <div><h1>{t("translate.title")}</h1><p>{t("translate.subtitle")}</p></div>
-      </div>
+    <section className="page translate-page" aria-label={t("translate.title")}>
       <TranslationOptions value={options} onChange={changeOptions} providers={data.providers} prompts={data.prompts} glossaries={data.glossaries} />
-      <div className="action-row">
-        <button className="primary-button" onClick={translate} disabled={working || !source.trim() || !options.providerId}>
-          <Languages size={18} /> {working ? t("translate.working") : t("translate.action")}
-        </button>
-      </div>
       <div className="editor-grid">
         <section className="editor-panel">
-          <header><strong>{t("translate.source")}</strong><span>{t("translate.characters", { count: source.length })}</span></header>
+          <header className="source-header">
+            <strong>{t("translate.source")}</strong>
+            <button className="primary-button source-translate-button" onClick={translate} disabled={working || !source.trim() || !options.providerId}>
+              <Languages size={16} /> {working ? t("translate.working") : t("translate.action")}
+            </button>
+            <span className="source-character-count">{t("translate.characters", { count: source.length })}</span>
+          </header>
           <textarea value={source} onChange={(event) => setSource(event.target.value)} placeholder={t("translate.placeholder")} autoFocus />
         </section>
         <section className="editor-panel result-panel">
           <header>
             <strong>{t("translate.target")}</strong>
+            <label className="check-row markdown-toggle"><input type="checkbox" checked={renderMarkdown} onChange={(event) => setRenderMarkdown(event.target.checked)} /><span>{t("translate.renderMarkdown")}</span></label>
             <button className="icon-button" onClick={copy} disabled={!result} title={t("translate.copy")} aria-label={t("translate.copy")}>
               {copied ? <Check size={18} /> : <Clipboard size={18} />}
             </button>
           </header>
-          <div className={`translation-result ${!result ? "empty" : ""}`}>{result || t("translate.target")}</div>
+          <div className={`translation-result ${!result ? "empty" : ""} ${renderMarkdown && result ? "markdown-body" : ""}`}>
+            {result ? renderMarkdown ? <Suspense fallback={result}><MarkdownText text={result} /></Suspense> : result : t("translate.target")}
+          </div>
         </section>
       </div>
       {error && <div className="alert error-alert">{error}</div>}
@@ -106,12 +114,11 @@ function readOptions(defaultProvider: string, defaultPrompt: string): Translatio
   try {
     const stored = JSON.parse(localStorage.getItem("tranova-translate-options") || "null") as Partial<TranslationOptionsValue> | null;
     if (!stored || typeof stored !== "object") return fallback;
-    const sourceLanguage = stored.sourceLanguage === "zh" ? "zh-CN" : stored.sourceLanguage;
     const targetLanguage = stored.targetLanguage === "zh" ? "zh-CN" : stored.targetLanguage;
     return {
       ...fallback,
       ...stored,
-      ...(sourceLanguage ? { sourceLanguage } : {}),
+      sourceLanguage: "auto",
       ...(targetLanguage ? { targetLanguage } : {}),
       glossaryIds: Array.isArray(stored.glossaryIds) ? stored.glossaryIds : [],
       reasoningEffort: stored.reasoningEffort === "none" || stored.reasoningEffort === "low" || stored.reasoningEffort === "medium" || stored.reasoningEffort === "high" ? stored.reasoningEffort : "none",

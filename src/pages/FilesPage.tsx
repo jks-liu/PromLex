@@ -3,12 +3,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, isDesktopApp } from "../api";
 import { TranslationOptions, type TranslationOptionsValue } from "../components/TranslationOptions";
+import { chooseOutputFolder, isArchive, readResumeInput, writeCompletedFile, type OutputFolder } from "../outputFolders";
 import { downloadBlob, saveBlobAs } from "../utils";
 import type { BootstrapData, FileJobStatus, FileOutputMode } from "../types";
 
 export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: () => Promise<void> }) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [folderFiles, setFolderFiles] = useState<File[]>([]);
+  const [outputFolder, setOutputFolder] = useState<OutputFolder | null>(null);
+  const [choosingOutput, setChoosingOutput] = useState(false);
+  const [outputViews, setOutputViews] = useState<Record<string, { name: string; count: number; error?: string }>>({});
+  const jobOutputFolders = useRef(new Map<string, OutputFolder>());
+  const browserOutputs = useRef(new Map<string, { handle: FileSystemDirectoryHandle; revisions: Map<number, number>; paths: Set<string>; busy: boolean; error: string }>());
   const defaultProvider = useMemo(() => data.providers.find((provider) => provider.enabled)?.id || "", [data.providers]);
   const [options, setOptions] = useState<TranslationOptionsValue>(() => readOptions(defaultProvider, data.prompts[0]?.id || ""));
   const [outputMode, setOutputMode] = useState<FileOutputMode>(() => readOutputMode());
@@ -32,6 +40,7 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
 
   const choose = useCallback((next: File | undefined, nextSourcePath = "") => {
     if (next) {
+      setFolderFiles([]);
       setFile(next);
       setSourcePath(nextSourcePath);
       setError("");
@@ -83,6 +92,32 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
       .finally(() => autoDownloadingIds.current.delete(job.id));
   }, [data.settings.autoDownloadFiles, downloadJob]);
 
+  const syncBrowserOutputs = useCallback((next: FileJobStatus[]) => {
+    for (const job of next) {
+      const output = browserOutputs.current.get(job.id);
+      if (!output || output.busy || output.error) continue;
+      const pending = (job.completedFiles || []).filter((entry) => !entry.resumed && output.revisions.get(entry.id) !== entry.revision);
+      if (!pending.length) continue;
+      output.busy = true;
+      void (async () => {
+        try {
+          for (const entry of pending) {
+            const blob = await api.downloadCompletedFile(job.id, entry.id);
+            await writeCompletedFile(output.handle, entry, blob, output.paths.has(entry.path));
+            output.paths.add(entry.path);
+            output.revisions.set(entry.id, entry.revision);
+            setOutputViews((current) => ({ ...current, [job.id]: { name: output.handle.name, count: output.paths.size } }));
+          }
+        } catch (reason) {
+          output.error = reason instanceof Error ? reason.message : String(reason);
+          setOutputViews((current) => ({ ...current, [job.id]: { name: output.handle.name, count: output.paths.size, error: output.error } }));
+        } finally {
+          output.busy = false;
+        }
+      })();
+    }
+  }, []);
+
   const syncJobs = useCallback(async () => {
     try {
       const next = await api.fileJobs();
@@ -90,12 +125,13 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
       const completedSinceLastRefresh = next.some((job) => job.state === "completed" && knownStates.current.has(job.id) && knownStates.current.get(job.id) !== "completed");
       for (const job of next) knownStates.current.set(job.id, job.state);
       setJobs(next);
+      syncBrowserOutputs(next);
       queueAutoDownload(next);
       if (completedSinceLastRefresh || (firstLoad && next.some((job) => job.state === "completed"))) void onReload();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
-  }, [onReload, queueAutoDownload]);
+  }, [onReload, queueAutoDownload, syncBrowserOutputs]);
 
   const refreshJobs = syncJobs;
 
@@ -167,20 +203,85 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
     }
   };
 
+  const chooseFolder = async () => {
+    if (!isDesktopApp()) {
+      folderInputRef.current?.click();
+      return;
+    }
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== "string") return;
+      const dropped = await api.readDroppedFile(selected);
+      const bytes = Uint8Array.from(atob(dropped.contentBase64), (character) => character.charCodeAt(0));
+      choose(new File([bytes], dropped.name, { type: "application/zip" }), selected);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const chooseOutput = async () => {
+    setChoosingOutput(true);
+    setError("");
+    try {
+      const folder = await chooseOutputFolder(t("files.outputUnsupported"));
+      if (folder) setOutputFolder(folder);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setChoosingOutput(false);
+    }
+  };
+
+  const retryOutput = async (job: FileJobStatus) => {
+    const folder = jobOutputFolders.current.get(job.id);
+    try {
+      if (folder?.kind === "desktop" || job.outputDirectory) {
+        const updated = await api.setFileJobOutput(job.id, folder?.kind === "desktop" ? folder.path : job.outputDirectory!);
+        setJobs((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setOutputViews((current) => { const next = { ...current }; delete next[job.id]; return next; });
+      } else {
+        const output = browserOutputs.current.get(job.id);
+        if (!output) return;
+        output.error = "";
+        setOutputViews((current) => ({ ...current, [job.id]: { name: output.handle.name, count: output.paths.size } }));
+        syncBrowserOutputs([job]);
+      }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+
   const translate = async () => {
-    if (!file || !options.providerId) return;
+    if ((!file && folderFiles.length === 0) || !options.providerId) return;
     setSubmitting(true);
     setError("");
     try {
-      const job = await api.translateFile(file, {
+      const useOutput = outputFolder && (folderFiles.length > 0 || (file && isArchive(file.name)));
+      const resume = useOutput ? await readResumeInput(outputFolder) : undefined;
+      const payload = {
         ...options,
+        sourceLanguage: "auto",
         promptId: options.promptId || undefined,
         outputMode,
         summarize,
-      }, sourcePath || undefined);
+      };
+      const job = folderFiles.length > 0
+        ? await api.translateFolder(folderFiles, payload, resume)
+        : await api.translateFile(file!, payload, sourcePath || undefined, resume);
+      if (useOutput) {
+        jobOutputFolders.current.set(job.id, outputFolder);
+        if (outputFolder.kind === "browser") {
+          browserOutputs.current.set(job.id, { handle: outputFolder.handle, revisions: new Map(), paths: new Set(), busy: false, error: "" });
+          setOutputViews((current) => ({ ...current, [job.id]: { name: outputFolder.name, count: 0 } }));
+        } else {
+          try { Object.assign(job, await api.setFileJobOutput(job.id, outputFolder.path)); }
+          catch (reason) { setOutputViews((current) => ({ ...current, [job.id]: { name: outputFolder.name, count: 0, error: reason instanceof Error ? reason.message : String(reason) } })); }
+        }
+      }
       knownStates.current.set(job.id, job.state);
       setJobs((current) => [job, ...current.filter((item) => item.id !== job.id)]);
       setFile(null);
+      setFolderFiles([]);
+      if (folderInputRef.current) folderInputRef.current.value = "";
       setSourcePath("");
       if (inputRef.current) inputRef.current.value = "";
     } catch (reason) {
@@ -243,8 +344,7 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
   };
 
   return (
-    <section className="page files-page">
-      <div className="page-heading"><div><h1>{t("files.title")}</h1><p>{t("files.subtitle")}</p></div></div>
+    <section className="page files-page" aria-label={t("files.title")}>
       <TranslationOptions value={options} onChange={changeOptions} providers={data.providers} prompts={data.prompts} glossaries={data.glossaries} />
       <div className="file-output-options">
         <label>
@@ -260,20 +360,36 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
         </label>
       </div>
       <button
-        className={`drop-zone ${file ? "has-file" : ""}`}
+        className={`drop-zone ${file || folderFiles.length ? "has-file" : ""}`}
         type="button"
         onClick={() => void chooseFile()}
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => { event.preventDefault(); if (!isDesktopApp()) choose(event.dataTransfer.files[0]); }}
       >
         {file ? <FileText size={34} /> : <UploadCloud size={34} />}
-        <strong>{file?.name || t("files.drop")}</strong>
+        <strong>{file?.name || (folderFiles.length ? t("files.folderSelected", { count: folderFiles.length, name: folderFiles[0].webkitRelativePath.split("/")[0] }) : t("files.drop"))}</strong>
         <span>{file ? `${(file.size / 1024).toFixed(1)} KB` : t("files.supported")}</span>
       </button>
-      <input ref={inputRef} className="visually-hidden" type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.markdown,.html,.htm,.csv,.json,.srt,.vtt,.png,.jpg,.jpeg,.webp" onChange={(event) => choose(event.target.files?.[0])} />
+      <input ref={inputRef} className="visually-hidden" type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md,.markdown,.html,.htm,.csv,.json,.srt,.vtt,.png,.jpg,.jpeg,.webp,.zip,.rar,.7z,.tar,.gz,.tgz,.bz2,.tbz,.tbz2,.xz,.txz,.zst,.tzst,.lzma" onChange={(event) => choose(event.target.files?.[0])} />
+      <input ref={folderInputRef} className="visually-hidden" type="file" multiple {...{ webkitdirectory: "", directory: "" }} onChange={(event) => {
+        const selected = Array.from(event.target.files || []);
+        if (selected.length) { setFile(null); setSourcePath(""); setFolderFiles(selected); setError(""); }
+      }} />
+      <div className="action-row folder-selection-row">
+        <button className="secondary-button" onClick={() => void chooseFolder()} disabled={submitting}><FolderOpen size={18} /> {t("files.chooseFolder")}</button>
+        <span className="muted">{t("files.folderHint")}</span>
+      </div>
+      <section className="file-output-folder">
+        <div className="action-row">
+          <button className="secondary-button" onClick={() => void chooseOutput()} disabled={submitting || choosingOutput}><FolderOpen size={18} /> {t("files.outputFolder")}</button>
+          <span className="output-folder-name">{outputFolder?.name || t("files.outputOptional")}</span>
+          {outputFolder && <button className="icon-text-button" onClick={() => setOutputFolder(null)} disabled={submitting}>{t("files.clearOutput")}</button>}
+        </div>
+        <p className="muted">{t("files.outputHint")}</p>
+      </section>
       {error && <div className="alert error-alert">{error}</div>}
       <div className="action-row">
-        <button className="primary-button" onClick={translate} disabled={!file || submitting || !options.providerId}>
+        <button className="primary-button" onClick={translate} disabled={(!file && !folderFiles.length) || submitting || !options.providerId}>
           <FileText size={18} /> {submitting ? t("files.working") : t("files.action")}
         </button>
         <button className="icon-text-button" onClick={() => void refreshJobs()} title={t("files.refresh")} aria-label={t("files.refresh")}>
@@ -286,6 +402,11 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
           <div className="file-job-list">
             {jobs.map((job) => {
               const percent = progressPercent(job);
+              const outputView = outputViews[job.id];
+              const outputName = job.outputDirectory || outputView?.name;
+              const outputError = job.outputError || outputView?.error;
+              const written = job.outputDirectory ? (job.completedFiles || []).filter((entry) => entry.savedPath).length : outputView?.count || 0;
+              const resumed = (job.completedFiles || []).filter((entry) => entry.resumed).length;
               return (
                 <article className={`file-job ${job.state}`} key={job.id}>
                   <div className="file-job-heading">
@@ -301,9 +422,13 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
                     <span>{t("files.batches", { done: job.completedBatches, total: job.totalBatches })}</span>
                     {job.skippedSegments > 0 && <span>{t("files.skipped", { count: job.skippedSegments })}</span>}
                   </div>
+                  {outputName && <div className="file-job-output"><span>{t("files.outputStatus", { count: written, path: outputName })}</span></div>}
+                  {outputError && <div className="file-job-partial"><span>{t("files.outputFailed", { error: outputError })}</span><button className="icon-text-button compact" onClick={() => void retryOutput(job)}>{t("files.retryOutput")}</button></div>}
+                  {!!job.completedFiles?.length && <details className="completed-files"><summary>{t("files.completedFiles", { count: job.completedFiles.length, resumed })}</summary><ul>{job.completedFiles.map((entry) => <li key={entry.id}><span>{entry.path}{entry.resumed ? ` · ${t("files.reused")}` : ""}</span><button className="icon-button" title={t("files.downloadEntry", { name: entry.path })} aria-label={t("files.downloadEntry", { name: entry.path })} onClick={() => { void api.downloadCompletedFile(job.id, entry.id).then((blob) => downloadBlob(entry.path.split("/").pop()!, blob)).catch((reason) => setError(String(reason))); }}><Download size={15} /></button></li>)}</ul></details>}
                   {job.streamingText && job.state === "processing" && <div className="file-job-stream"><strong>{t("files.streaming")}</strong><pre>{job.streamingText}</pre></div>}
                   {(job.state === "failed" || job.failedBatches.length > 0) && <div className="file-job-partial"><span>{job.state === "failed" ? t("files.retryFileHint") : t("files.partialWarning", { count: job.failedSegments })}</span><button className="icon-text-button compact" onClick={() => void retryFailedBatches(job)} disabled={(job.state !== "failed" && job.state !== "completed") || retryingId === job.id}><RefreshCw size={15} className={retryingId === job.id ? "spin-icon" : undefined} /> {retryingId === job.id ? t("files.retrying") : job.state === "failed" ? t("files.retryFile") : t("files.retryFailed")}</button></div>}
                   {!!job.preservedPdfPages?.length && <div className="file-job-partial" role="status">{t("files.pdfLayoutWarning", { pages: job.preservedPdfPages.join(", ") })}</div>}
+                  {job.archivePdfWarnings?.map((warning) => <div key={warning.filename} className="file-job-partial" role="status">{warning.filename}: {t("files.pdfLayoutWarning", { pages: warning.pages.join(", ") })}</div>)}
                   {job.error && <div className="file-job-error">{job.error}</div>}
                   {(job.state === "queued" || job.state === "processing") && <div className="file-job-actions file-job-cancel"><span className="muted">{job.state === "queued" ? t("files.waitingForQueue") : t(`files.${job.stage}`)}</span><button className="icon-text-button compact" onClick={() => void cancelJob(job)} disabled={cancellingId === job.id}><Ban size={15} /> {cancellingId === job.id ? t("files.cancelling") : t("files.cancel")}</button></div>}
                   {job.state === "completed" && (
@@ -362,12 +487,11 @@ function readOptions(defaultProvider: string, defaultPrompt: string): Translatio
   try {
     const stored = JSON.parse(localStorage.getItem("tranova-file-options") || "null") as Partial<TranslationOptionsValue> | null;
     if (!stored || typeof stored !== "object") return fallback;
-    const sourceLanguage = stored.sourceLanguage === "zh" ? "zh-CN" : stored.sourceLanguage;
     const targetLanguage = stored.targetLanguage === "zh" ? "zh-CN" : stored.targetLanguage;
     return {
       ...fallback,
       ...stored,
-      ...(sourceLanguage ? { sourceLanguage } : {}),
+      sourceLanguage: "auto",
       ...(targetLanguage ? { targetLanguage } : {}),
       glossaryIds: Array.isArray(stored.glossaryIds) ? stored.glossaryIds : [],
       reasoningEffort: stored.reasoningEffort === "none" || stored.reasoningEffort === "low" || stored.reasoningEffort === "medium" || stored.reasoningEffort === "high" ? stored.reasoningEffort : "none",

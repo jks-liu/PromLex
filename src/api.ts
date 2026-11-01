@@ -2,6 +2,7 @@ import type {
   AppSettings,
   BootstrapData,
   FileJobStatus,
+  FileResumeInput,
   Glossary,
   HistoryEntry,
   PromptTemplate,
@@ -54,6 +55,11 @@ async function requestBlob(path: string): Promise<Blob> {
   return response.blob();
 }
 
+function appendResumeInput(form: FormData, resume?: FileResumeInput) {
+  if (resume?.archive) form.append("resumeArchive", resume.archive);
+  for (const entry of resume?.files || []) form.append("resumeFile", entry.file, entry.path);
+}
+
 export const api = {
   bootstrap: () => request<BootstrapData>("/bootstrap"),
   history: () => request<HistoryEntry[]>("/history"),
@@ -65,11 +71,23 @@ export const api = {
     request<void>(`/logs/${kind}${before === undefined ? "" : `?before=${before}`}`, { method: "DELETE" }),
   translate: (payload: TranslateRequest) =>
     request<TranslationResult>("/translate", { method: "POST", body: JSON.stringify(payload) }),
-  translateFile: async (file: File, options: TranslateFileOptions, sourcePath?: string) => {
+  translateFile: async (file: File, options: TranslateFileOptions, sourcePath?: string, resume?: FileResumeInput) => {
     const form = new FormData();
     form.append("file", file);
     form.append("options", JSON.stringify(options));
     if (sourcePath) form.append("sourcePath", sourcePath);
+    appendResumeInput(form, resume);
+    return request<FileJobStatus>("/translate-file", { method: "POST", body: form });
+  },
+  translateFolder: async (files: File[], options: TranslateFileOptions, resume?: FileResumeInput) => {
+    const form = new FormData();
+    appendResumeInput(form, resume);
+    form.append("folderName", files[0]?.webkitRelativePath.split("/")[0] || "folder");
+    for (const file of files) {
+      const path = file.webkitRelativePath;
+      form.append("folderFile", file, path ? path.slice(path.indexOf("/") + 1) : file.name);
+    }
+    form.append("options", JSON.stringify(options));
     return request<FileJobStatus>("/translate-file", { method: "POST", body: form });
   },
   fileJobs: () => request<FileJobStatus[]>("/file-jobs"),
@@ -79,6 +97,15 @@ export const api = {
   retryFileJob: (id: string) =>
     request<FileJobStatus>(`/file-jobs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   downloadFileJob: (id: string) => requestBlob(`/file-jobs/${encodeURIComponent(id)}/download`),
+  downloadCompletedFile: (id: string, index: number) => requestBlob(`/file-jobs/${encodeURIComponent(id)}/files/${index}`),
+  setFileJobOutput: async (id: string, directory: string) => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<FileJobStatus>("set_file_job_output", { jobId: id, directory });
+  },
+  readOutputDirectory: async (path: string) => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<{ name: string; contentBase64: string }>("read_output_directory", { path });
+  },
   saveFileJob: async (id: string, destination: string) => {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<FileJobStatus>("save_file_job", { jobId: id, destination });

@@ -68,6 +68,7 @@ pub struct FileTranslationResult {
     pub failed_batches: Vec<FileBatchFailure>,
     pub retry_context: Option<FileRetryContext>,
     pub preserved_pdf_pages: Vec<usize>,
+    pub archive_pdf_warnings: Vec<crate::models::ArchivePdfWarning>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,9 +78,16 @@ pub struct FileRetryContext {
     options: TranslateRequest,
     output_mode: FileOutputMode,
     cached_batches: HashMap<usize, CachedBatch>,
+    archive_contexts: HashMap<String, FileRetryContext>,
+    completed_files: HashMap<String, Vec<u8>>,
 }
 
 impl FileRetryContext {
+    pub(crate) fn with_completed_files(mut self, files: HashMap<String, Vec<u8>>) -> Self {
+        self.completed_files = files;
+        self
+    }
+
     pub(crate) fn new(
         filename: &str,
         bytes: Vec<u8>,
@@ -92,6 +100,8 @@ impl FileRetryContext {
             options,
             output_mode,
             cached_batches: HashMap::new(),
+            archive_contexts: HashMap::new(),
+            completed_files: HashMap::new(),
         }
     }
 }
@@ -134,31 +144,6 @@ struct Counts {
     streaming_text: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn translate_file_with_cancel(
-    store: &AppStore,
-    scheduler: &AiScheduler,
-    filename: &str,
-    bytes: Vec<u8>,
-    options: TranslateRequest,
-    output_mode: FileOutputMode,
-    progress: ProgressCallback,
-    cancel: CancellationToken,
-) -> Result<FileTranslationResult, FileError> {
-    translate_file_with_cache(
-        store,
-        scheduler,
-        filename,
-        bytes,
-        options,
-        output_mode,
-        progress,
-        HashMap::new(),
-        cancel,
-    )
-    .await
-}
-
 pub async fn retry_file_with_cancel(
     store: &AppStore,
     scheduler: &AiScheduler,
@@ -166,12 +151,16 @@ pub async fn retry_file_with_cancel(
     progress: ProgressCallback,
     cancel: CancellationToken,
 ) -> Result<FileTranslationResult, FileError> {
+    if crate::archives::is_archive(&context.filename) {
+        return translate_archive(store, scheduler, context, progress, cancel).await;
+    }
     let FileRetryContext {
         filename,
         bytes,
         options,
         output_mode,
         cached_batches,
+        ..
     } = context;
     translate_file_with_cache(
         store,
@@ -366,17 +355,17 @@ async fn translate_file_with_cache(
     counts.streaming_batch_segments = 0;
     counts.streaming_text = None;
     report(&counts, &progress);
-    let retry_context = if batch_state.failed_batches.is_empty() {
-        None
-    } else {
-        Some(FileRetryContext {
-            filename: filename.to_string(),
-            bytes: source_bytes,
-            options: options.clone(),
-            output_mode,
-            cached_batches: batch_state.cached_batches,
-        })
-    };
+    // Archive retries also retain successful member batches; the job manager drops
+    // this cache once the entire job succeeds.
+    let retry_context = Some(FileRetryContext {
+        filename: filename.to_string(),
+        bytes: source_bytes,
+        options: options.clone(),
+        output_mode,
+        cached_batches: batch_state.cached_batches,
+        archive_contexts: HashMap::new(),
+        completed_files: HashMap::new(),
+    });
     Ok(FileTranslationResult {
         filename: output_filename(filename),
         media_type: output_media_type(filename),
@@ -389,11 +378,193 @@ async fn translate_file_with_cache(
         failed_batches: batch_state.failed_batches,
         retry_context,
         preserved_pdf_pages: counts.preserved_pdf_pages,
+        archive_pdf_warnings: Vec::new(),
     })
 }
 
+async fn translate_archive(
+    store: &AppStore,
+    scheduler: &AiScheduler,
+    mut context: FileRetryContext,
+    progress: ProgressCallback,
+    cancel: CancellationToken,
+) -> Result<FileTranslationResult, FileError> {
+    ensure_not_cancelled(&cancel)?;
+    let filename = context.filename.clone();
+    let source = context.bytes.clone();
+    let unpack =
+        tokio::task::spawn_blocking(move || crate::archives::read_archive(&filename, &source));
+    let entries = tokio::select! {
+        result = unpack => result.map_err(|error| FileError::Message(error.to_string()))??,
+        _ = cancel.cancelled() => return Err(FileError::Cancelled),
+    };
+    if !entries
+        .iter()
+        .any(|entry| !entry.name.ends_with('/') && supported_document(&entry.name))
+    {
+        return Err(FileError::Message(
+            "The folder or archive contains no supported documents".into(),
+        ));
+    }
+    let mut output = Vec::new();
+    let mut counts = Counts {
+        stage: "translating".into(),
+        ..Counts::default()
+    };
+    let mut failed_batches = Vec::new();
+    let mut retry_contexts = HashMap::new();
+    let mut archive_pdf_warnings = Vec::new();
+    for mut entry in entries {
+        ensure_not_cancelled(&cancel)?;
+        if !entry.name.ends_with('/') && supported_document(&entry.name) {
+            if let Some(bytes) = context.completed_files.get(&entry.name) {
+                entry.bytes = bytes.clone();
+                let mut value = progress_snapshot(&counts);
+                value.completed_file = Some(crate::models::CompletedFile {
+                    path: entry.name.clone(),
+                    bytes: bytes.clone(),
+                    resumed: true,
+                });
+                progress(value);
+                output.push(entry);
+                continue;
+            }
+            let offset_segments = counts.total_segments;
+            let offset_translated = counts.translated;
+            let offset_skipped = counts.skipped;
+            let offset_failed = counts.failed;
+            let offset_batches = counts.total_batches;
+            let offset_completed = counts.completed_batches;
+            let callback = progress.clone();
+            let child_progress: ProgressCallback = Arc::new(move |mut value| {
+                value.total_segments += offset_segments;
+                value.translated_segments += offset_translated;
+                value.skipped_segments += offset_skipped;
+                value.failed_segments += offset_failed;
+                value.total_batches += offset_batches;
+                value.completed_batches += offset_completed;
+                value.streaming_batch = value.streaming_batch.map(|batch| batch + offset_batches);
+                if value.stage == "completed" {
+                    value.stage = "packing".into();
+                }
+                callback(value);
+            });
+            let child = context
+                .archive_contexts
+                .remove(&entry.name)
+                .unwrap_or_else(|| {
+                    FileRetryContext::new(
+                        &entry.name,
+                        entry.bytes.clone(),
+                        context.options.clone(),
+                        context.output_mode,
+                    )
+                });
+            let result = Box::pin(retry_file_with_cancel(
+                store,
+                scheduler,
+                child,
+                child_progress,
+                cancel.clone(),
+            ))
+            .await
+            .map_err(|error| match error {
+                FileError::Cancelled => FileError::Cancelled,
+                error => FileError::Message(format!("{}: {error}", entry.name)),
+            })?;
+            if !result.preserved_pdf_pages.is_empty() {
+                archive_pdf_warnings.push(crate::models::ArchivePdfWarning {
+                    filename: entry.name.clone(),
+                    pages: result.preserved_pdf_pages.clone(),
+                });
+            }
+            counts.total_segments += result.total_segments;
+            counts.translated += result.translated_segments;
+            counts.skipped += result.skipped_segments;
+            counts.failed += result.failed_segments;
+            counts.total_batches += result.total_batches;
+            counts.completed_batches += result.total_batches - result.failed_batches.len();
+            for mut failure in result.failed_batches {
+                failure.id += offset_batches;
+                failure.error = format!("{}: {}", entry.name, failure.error);
+                failed_batches.push(failure);
+            }
+            if let Some(retry) = result.retry_context {
+                retry_contexts.insert(entry.name.clone(), retry);
+            }
+            entry.bytes = result.content;
+            if result.failed_segments == 0 && result.preserved_pdf_pages.is_empty() {
+                let mut value = progress_snapshot(&counts);
+                value.completed_file = Some(crate::models::CompletedFile {
+                    path: entry.name.clone(),
+                    bytes: entry.bytes.clone(),
+                    resumed: false,
+                });
+                progress(value);
+            }
+        }
+        output.push(entry);
+    }
+    ensure_not_cancelled(&cancel)?;
+    counts.stage = "packing".into();
+    report(&counts, &progress);
+    let pack = tokio::task::spawn_blocking(move || crate::archives::write_7z(&output));
+    let content = tokio::select! {
+        result = pack => result.map_err(|error| FileError::Message(error.to_string()))??,
+        _ = cancel.cancelled() => return Err(FileError::Cancelled),
+    };
+    context.archive_contexts = retry_contexts;
+    let has_failures = !failed_batches.is_empty();
+    Ok(FileTranslationResult {
+        filename: crate::archives::result_filename(&context.filename),
+        media_type: "application/x-7z-compressed".into(),
+        content,
+        translated_segments: counts.translated,
+        skipped_segments: counts.skipped,
+        total_segments: counts.total_segments,
+        total_batches: counts.total_batches,
+        failed_segments: counts.failed,
+        failed_batches,
+        preserved_pdf_pages: Vec::new(),
+        archive_pdf_warnings,
+        retry_context: if has_failures { Some(context) } else { None },
+    })
+}
+
+pub(crate) fn supported_document(filename: &str) -> bool {
+    matches!(
+        filename
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "pdf"
+            | "docx"
+            | "pptx"
+            | "xlsx"
+            | "txt"
+            | "md"
+            | "markdown"
+            | "html"
+            | "htm"
+            | "csv"
+            | "json"
+            | "srt"
+            | "vtt"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+    )
+}
+
 fn report(counts: &Counts, progress: &ProgressCallback) {
-    progress(FileProgress {
+    progress(progress_snapshot(counts));
+}
+
+fn progress_snapshot(counts: &Counts) -> FileProgress {
+    FileProgress {
         stage: counts.stage.clone(),
         total_segments: counts.total_segments,
         translated_segments: counts.translated,
@@ -405,7 +576,8 @@ fn report(counts: &Counts, progress: &ProgressCallback) {
         streaming_segments: counts.streaming_segments,
         streaming_batch_segments: counts.streaming_batch_segments,
         streaming_text: counts.streaming_text.clone(),
-    });
+        completed_file: None,
+    }
 }
 
 fn ensure_not_cancelled(cancel: &CancellationToken) -> Result<(), FileError> {

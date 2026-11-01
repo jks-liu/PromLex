@@ -112,6 +112,10 @@ fn api_router(state: ServerState) -> Router {
         .route("/api/file-jobs/{id}", get(file_job))
         .route("/api/file-jobs/{id}/cancel", post(cancel_file_job))
         .route("/api/file-jobs/{id}/download", get(download_file_job))
+        .route(
+            "/api/file-jobs/{id}/files/{index}",
+            get(download_completed_file),
+        )
         .route("/api/file-jobs/{id}/retry", post(retry_file_job))
         .route("/api/history", get(history).delete(clear_history))
         .route("/api/history/{id}", delete(delete_history))
@@ -128,7 +132,7 @@ fn api_router(state: ServerState) -> Router {
         .route("/api/logs/{kind}", delete(clear_logs))
         .route("/api/logs/{kind}/{id}", delete(delete_log))
         .route("/api/import/{kind}", post(import_data))
-        .layer(DefaultBodyLimit::max(75 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(151 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
@@ -233,6 +237,11 @@ async fn translate_file(
     mut multipart: Multipart,
 ) -> Result<Json<FileJobStatus>, ApiError> {
     let mut file: Option<(String, Vec<u8>)> = None;
+    let mut folder_entries = Vec::new();
+    let mut folder_bytes = 0usize;
+    let mut resume_files = std::collections::HashMap::new();
+    let mut resume_bytes = 0usize;
+    let mut folder_name = String::from("folder.zip");
     let mut options: Option<TranslateOptions> = None;
     let mut source_path: Option<String> = None;
     while let Some(field) = multipart
@@ -250,7 +259,50 @@ async fn translate_file(
                     .unwrap_or("document")
                     .to_string();
                 let bytes = field.bytes().await.map_err(ApiError::bad_request)?.to_vec();
+                if bytes.len() > crate::archives::MAX_BYTES as usize {
+                    return Err(ApiError::bad_request("Input exceeds 75 MB"));
+                }
                 file = Some((name, bytes));
+            }
+            Some("resumeFile") => {
+                let name = field.file_name().unwrap_or("document").to_string();
+                let bytes = field.bytes().await.map_err(ApiError::bad_request)?.to_vec();
+                resume_bytes += bytes.len();
+                if resume_bytes > crate::archives::MAX_BYTES as usize
+                    || resume_files.len() >= 10_000
+                {
+                    return Err(ApiError::bad_request(
+                        "Output folder exceeds the resume size limit",
+                    ));
+                }
+                resume_files.insert(name, bytes);
+            }
+            Some("resumeArchive") => {
+                let bytes = field.bytes().await.map_err(ApiError::bad_request)?;
+                for entry in crate::archives::read_zip(&bytes).map_err(ApiError::bad_request)? {
+                    if files::supported_document(&entry.name) && !entry.name.ends_with('/') {
+                        resume_files.insert(entry.name, entry.bytes);
+                    }
+                }
+            }
+            Some("folderName") => {
+                let name = field.text().await.map_err(ApiError::bad_request)?;
+                folder_name = format!(
+                    "{}.zip",
+                    name.rsplit(['/', '\\']).next().unwrap_or("folder")
+                );
+            }
+            Some("folderFile") => {
+                if folder_entries.len() >= 10_000 {
+                    return Err(ApiError::bad_request("Too many folder entries"));
+                }
+                let name = field.file_name().unwrap_or("document").to_string();
+                let bytes = field.bytes().await.map_err(ApiError::bad_request)?.to_vec();
+                folder_bytes += bytes.len();
+                if folder_bytes > crate::archives::MAX_BYTES as usize {
+                    return Err(ApiError::bad_request("Folder exceeds 75 MB"));
+                }
+                folder_entries.push(crate::archives::Entry { name, bytes });
             }
             Some("options") => {
                 let text = field.text().await.map_err(ApiError::bad_request)?;
@@ -262,16 +314,28 @@ async fn translate_file(
             _ => {}
         }
     }
+    if !folder_entries.is_empty() {
+        file = Some((
+            folder_name,
+            crate::archives::write_zip(&folder_entries).map_err(ApiError::bad_request)?,
+        ));
+    }
+    if resume_files.values().map(Vec::len).sum::<usize>() > crate::archives::MAX_BYTES as usize
+        || resume_files.len() > 10_000
+    {
+        return Err(ApiError::bad_request("Output folder exceeds resume limits"));
+    }
     let (filename, bytes) = file.ok_or_else(|| ApiError::bad_request("A file is required"))?;
     let options =
         options.ok_or_else(|| ApiError::bad_request("Translation options are required"))?;
     let output_mode = options.output_mode;
     let request = options.into_request();
     let retry_context =
-        files::FileRetryContext::new(&filename, bytes.clone(), request.clone(), output_mode);
+        files::FileRetryContext::new(&filename, bytes, request.clone(), output_mode)
+            .with_completed_files(resume_files);
     let status = state
         .jobs
-        .create(&filename, output_mode, source_path, retry_context);
+        .create(&filename, output_mode, source_path, retry_context.clone());
     let job_id = status.id.clone();
     state.store.add_system_log(
         "info",
@@ -305,13 +369,10 @@ async fn translate_file(
         let progress: files::ProgressCallback = Arc::new(move |value| {
             progress_jobs.update_progress(&progress_job_id, value);
         });
-        match files::translate_file_with_cancel(
+        match files::retry_file_with_cancel(
             &store,
             &scheduler,
-            &filename,
-            bytes,
-            request.clone(),
-            output_mode,
+            retry_context,
             progress,
             cancel.clone(),
         )
@@ -448,6 +509,26 @@ async fn download_file_job(
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&media_type).map_err(ApiError::internal)?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition(&filename)).map_err(ApiError::internal)?,
+    );
+    Ok(response)
+}
+
+async fn download_completed_file(
+    State(state): State<ApiState>,
+    Path((id, index)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    let (filename, bytes) = state
+        .jobs
+        .completed_file(&id, index)
+        .ok_or_else(|| ApiError::not_found("Translated file is not ready"))?;
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,

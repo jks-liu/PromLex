@@ -1,4 +1,5 @@
 mod ai;
+mod archives;
 mod files;
 mod jobs;
 mod models;
@@ -63,11 +64,46 @@ struct DroppedFile {
 }
 
 #[tauri::command]
+fn set_file_job_output(
+    state: tauri::State<'_, DesktopState>,
+    job_id: String,
+    directory: String,
+) -> Result<FileJobStatus, String> {
+    state
+        .jobs
+        .set_output_directory(&job_id, &PathBuf::from(directory))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn read_output_directory(path: String) -> Result<DroppedFile, String> {
+    let bytes =
+        archives::pack_output_directory(&PathBuf::from(path)).map_err(|error| error.to_string())?;
+    Ok(DroppedFile {
+        name: "resume.zip".into(),
+        content_base64: BASE64.encode(bytes),
+    })
+}
+
+#[tauri::command]
 fn read_dropped_file(path: String) -> Result<DroppedFile, String> {
     let path = PathBuf::from(path);
     let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if metadata.is_dir() {
+        let name = format!(
+            "{}.zip",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("folder")
+        );
+        let bytes = archives::pack_directory(&path).map_err(|error| error.to_string())?;
+        return Ok(DroppedFile {
+            name,
+            content_base64: BASE64.encode(bytes),
+        });
+    }
     if !metadata.is_file() {
-        return Err("Dropped path is not a file".to_string());
+        return Err("Unsupported path".into());
     }
     if metadata.len() > 75 * 1024 * 1024 {
         return Err("Dropped file exceeds the 75 MB limit".to_string());
@@ -137,6 +173,8 @@ pub fn run() {
             server_url,
             read_dropped_file,
             save_file_job,
+            set_file_job_output,
+            read_output_directory,
             open_path
         ])
         .setup(move |app| {

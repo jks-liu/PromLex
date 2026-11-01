@@ -192,6 +192,7 @@ struct Completion {
 }
 
 enum WorkResult {
+    Cancelled,
     Translate(Result<TranslationResult, AiError>),
     TranslateBatch(Result<Vec<String>, AiError>),
     Summarize(Result<String, AiError>),
@@ -382,31 +383,48 @@ async fn execute_work(
     store: AppStore,
     provider_id: String,
     priority: Priority,
-    work: Work,
+    mut work: Work,
 ) -> Completion {
-    let result = match &work {
+    // Dropping a cancelled caller also aborts its provider request and releases its slot.
+    let result = match &mut work {
         Work::Translate {
-            request, stream, ..
-        } => WorkResult::Translate(ai::translate(&store, request, stream.clone()).await),
+            request,
+            stream,
+            response,
+        } => tokio::select! {
+            biased;
+            _ = response.closed() => WorkResult::Cancelled,
+            result = ai::translate(&store, request, stream.clone()) => WorkResult::Translate(result),
+        },
         Work::TranslateBatch {
             request,
             texts,
             stream,
-            ..
-        } => WorkResult::TranslateBatch(
-            ai::translate_batch(&store, request, texts, stream.clone()).await,
-        ),
-        Work::Summarize { request, text, .. } => {
-            WorkResult::Summarize(ai::summarize(&store, request, text).await)
-        }
+            response,
+        } => tokio::select! {
+            biased;
+            _ = response.closed() => WorkResult::Cancelled,
+            result = ai::translate_batch(&store, request, texts, stream.clone()) => WorkResult::TranslateBatch(result),
+        },
+        Work::Summarize {
+            request,
+            text,
+            response,
+        } => tokio::select! {
+            biased;
+            _ = response.closed() => WorkResult::Cancelled,
+            result = ai::summarize(&store, request, text) => WorkResult::Summarize(result),
+        },
         Work::TranslateImage {
             request,
             filename,
             image,
-            ..
-        } => WorkResult::TranslateImage(
-            ai::translate_image(&store, request, filename, image.clone()).await,
-        ),
+            response,
+        } => tokio::select! {
+            biased;
+            _ = response.closed() => WorkResult::Cancelled,
+            result = ai::translate_image(&store, request, filename, image.clone()) => WorkResult::TranslateImage(result),
+        },
     };
     Completion {
         provider_id,

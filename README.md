@@ -4,8 +4,9 @@ PromLex is a Tauri-based AI translation studio for text and documents. The deskt
 
 ## Features
 
-- Text translation with reusable prompt templates and any number of selected glossaries.
-- Preset or custom source and target languages, including a one-click language swap.
+- Text translation with reusable prompt templates, per-translation instructions, inline template guidance and any number of selected glossaries.
+- Optional Markdown rendering of translated text, with a remembered toggle and raw-text copying.
+- Automatic source-language detection and preset or custom target languages.
 - Persistent translation history shared by the desktop app and local Web interface.
 - Import and export of prompts and glossaries as JSON.
 - AI providers use the OpenAI Responses API shape. Cloud services and local runtimes such as Ollama, llama.cpp and LM Studio can be configured by entering their OpenAI-compatible base URL.
@@ -14,6 +15,8 @@ PromLex is a Tauri-based AI translation studio for text and documents. The deskt
 - English and Simplified Chinese interfaces.
 - Streaming text and file translation with selectable reasoning effort, optional document summaries, cancellation and queued file jobs.
 - Document translation for PDF, DOCX, PPTX, XLSX, TXT, Markdown, HTML, CSV, JSON, SRT and VTT.
+- Optional output folders receive fully translated files as they finish. Select the same output folder after interruption to reuse existing files by relative path; incomplete or failed files are not written. Browser folder writing requires a browser with the File System Access API (such as Chrome or Edge) on localhost or HTTPS.
+- Recursive folder and archive translation: ZIP, RAR, 7z, tar, tar.gz/tgz, tar.bz2/tbz/tbz2, tar.xz/txz, tar.zst/tzst and tar.lzma inputs; results always use 7z. Relative paths and unsupported files (including nested archives) are preserved. Expanded input is limited to 75 MB and 10,000 entries. Encrypted and multipart archives are not supported.
 - Optional system and AI conversation logs with configurable minimum log level.
 - Image translation for PNG, JPG and WebP, including images embedded in Office documents, when the configured Responses API provider supports image input and the `image_generation` tool.
 - Local-only Web access with the same React interface and Rust API used by the desktop app.
@@ -25,7 +28,7 @@ Office Open XML documents are unpacked locally. PromLex extracts paragraph or te
 ### Prerequisites
 
 - Node.js 20 or newer and npm.
-- Rust 1.77 or newer with Cargo.
+- Rust 1.93 or newer with Cargo.
 - The platform prerequisites for Tauri 2. On Windows, install the WebView2 Runtime and Visual Studio Build Tools with the Desktop C++ workload and Windows SDK.
 - A configured AI provider is required before a translation can be performed.
 

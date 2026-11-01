@@ -42,11 +42,12 @@ impl AppStore {
             .expect("a configured or platform data directory is always present");
         fs::create_dir_all(directory)?;
         let path = directory.join("tranova-data.json");
-        let data = match fs::read_to_string(&path) {
+        let mut data = match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|_| AppData::default()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => AppData::default(),
             Err(error) => return Err(error),
         };
+        data.upgrade_default_prompt();
         let store = Self {
             inner: Arc::new(StoreInner {
                 path,

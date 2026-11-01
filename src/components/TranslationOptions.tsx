@@ -1,4 +1,4 @@
-import { ArrowLeftRight, ChevronDown } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Glossary, PromptTemplate, Provider, ReasoningEffort } from "../types";
@@ -25,7 +25,9 @@ interface TranslationOptionsProps {
 
 export function TranslationOptions({ value, onChange, providers, prompts, glossaries }: TranslationOptionsProps) {
   const { t } = useTranslation();
-  const update = (patch: Partial<TranslationOptionsValue>) => onChange({ ...value, ...patch });
+  const instructionsId = useId();
+  const helpId = useId();
+  const update = (patch: Partial<TranslationOptionsValue>) => onChange({ ...value, ...patch, sourceLanguage: "auto" });
 
   const toggleGlossary = (id: string) => {
     const glossaryIds = value.glossaryIds.includes(id)
@@ -36,23 +38,7 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
 
   return (
     <div className="translation-options">
-      <div className="language-pair">
-        <LanguageInput
-          label={t("translate.sourceLanguage")}
-          value={value.sourceLanguage}
-          allowAuto
-          onChange={(sourceLanguage) => update({ sourceLanguage })}
-        />
-        <button
-          className="icon-button language-swap"
-          type="button"
-          onClick={() => update({ sourceLanguage: value.targetLanguage, targetLanguage: value.sourceLanguage })}
-          disabled={value.sourceLanguage === "auto"}
-          title={t("translate.swapLanguages")}
-          aria-label={t("translate.swapLanguages")}
-        >
-          <ArrowLeftRight size={18} />
-        </button>
+      <div className="target-language-option">
         <LanguageInput
           label={t("translate.targetLanguage")}
           value={value.targetLanguage}
@@ -72,14 +58,6 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
           <option value="">{t("common.none")}</option>
           {prompts.map((prompt) => <option key={prompt.id} value={prompt.id}>{prompt.name}</option>)}
         </select>
-      </label>
-      <label className="additional-prompt">
-        <span>{t("translate.additionalPrompt")}</span>
-        <textarea
-          value={value.additionalPrompt}
-          onChange={(event) => update({ additionalPrompt: event.target.value })}
-          placeholder={t("translate.additionalPromptPlaceholder")}
-        />
       </label>
       <label>
         <span>{t("translate.reasoning")}</span>
@@ -102,6 +80,26 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
           ))}
         </div>
       </fieldset>
+      <div className="additional-prompt">
+        <div className="instructions-heading">
+          <label htmlFor={instructionsId}>{t("translate.additionalPrompt")}</label>
+          <details className="template-help">
+            <summary>{t("translate.templateHelp")}</summary>
+            <div className="template-help-content" id={helpId}>
+              <p>{t("translate.templateHelpText")}</p>
+              <p>{t("translate.templateVariables")}</p>
+              <p>{t("translate.instructionsHelp")}</p>
+            </div>
+          </details>
+        </div>
+        <textarea
+          id={instructionsId}
+          aria-describedby={helpId}
+          value={value.additionalPrompt}
+          onChange={(event) => update({ additionalPrompt: event.target.value })}
+          placeholder={t("translate.additionalPromptPlaceholder")}
+        />
+      </div>
     </div>
   );
 }
@@ -109,12 +107,10 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
 function LanguageInput({
   label,
   value,
-  allowAuto = false,
   onChange,
 }: {
   label: string;
   value: string;
-  allowAuto?: boolean;
   onChange: (value: string) => void;
 }) {
   const { t } = useTranslation();
@@ -122,7 +118,7 @@ function LanguageInput({
   const rootRef = useRef<HTMLDivElement>(null);
   const inputId = useId();
   const listId = useId();
-  const languages = allowAuto ? ["auto", ...LANGUAGES] : LANGUAGES;
+  const languages = LANGUAGES;
   const selectedLanguage = value === "zh" ? "zh-CN" : value;
   const displayValue = languages.includes(selectedLanguage)
     ? t(`languages.${selectedLanguage}`)

@@ -188,13 +188,26 @@ pub struct AppData {
     pub ai_conversations: Vec<AiConversationLog>,
 }
 
+pub const DEFAULT_TRANSLATION_PROMPT: &str = "Automatically detect the source language and translate faithfully to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
+const LEGACY_TRANSLATION_PROMPT: &str = "Translate faithfully from {{source_language}} to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
+
 fn default_prompts() -> Vec<PromptTemplate> {
     vec![PromptTemplate {
         id: "faithful-translation".to_string(),
         name: "Faithful translation".to_string(),
-        content: "Translate faithfully from {{source_language}} to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}".to_string(),
+        content: DEFAULT_TRANSLATION_PROMPT.to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
     }]
+}
+
+impl AppData {
+    pub(crate) fn upgrade_default_prompt(&mut self) {
+        for prompt in &mut self.prompts {
+            if prompt.id == "faithful-translation" && prompt.content == LEGACY_TRANSLATION_PROMPT {
+                prompt.content = DEFAULT_TRANSLATION_PROMPT.to_string();
+            }
+        }
+    }
 }
 
 impl Default for AppData {
@@ -283,6 +296,21 @@ mod tests {
     };
 
     #[test]
+    fn default_prompt_upgrade_keeps_user_edits() {
+        let mut data = super::AppData::default();
+        assert!(data.prompts[0].content.starts_with("Automatically detect"));
+        data.prompts[0].content = super::LEGACY_TRANSLATION_PROMPT.into();
+        data.upgrade_default_prompt();
+        assert_eq!(data.prompts[0].content, super::DEFAULT_TRANSLATION_PROMPT);
+        data.prompts[0].content = "My custom translation instructions".into();
+        data.upgrade_default_prompt();
+        assert_eq!(
+            data.prompts[0].content,
+            "My custom translation instructions"
+        );
+    }
+
+    #[test]
     fn settings_default_timeout_is_180_seconds() {
         assert_eq!(AppSettings::default().ai_timeout_seconds, 180);
         let settings: AppSettings = serde_json::from_str(
@@ -366,6 +394,24 @@ pub struct FileProgress {
     pub streaming_segments: usize,
     pub streaming_batch_segments: usize,
     pub streaming_text: Option<String>,
+    pub completed_file: Option<CompletedFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedFile {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub resumed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedFileStatus {
+    pub id: usize,
+    pub path: String,
+    pub revision: usize,
+    pub resumed: bool,
+    pub saved_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -375,6 +421,13 @@ pub struct FileBatchFailure {
     pub segment_count: usize,
     pub attempts: usize,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivePdfWarning {
+    pub filename: String,
+    pub pages: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -403,6 +456,10 @@ pub struct FileJobStatus {
     pub completed_batches: usize,
     #[serde(default)]
     pub preserved_pdf_pages: Vec<usize>,
+    pub archive_pdf_warnings: Vec<ArchivePdfWarning>,
+    pub completed_files: Vec<CompletedFileStatus>,
+    pub output_directory: Option<String>,
+    pub output_error: Option<String>,
     pub failed_batches: Vec<FileBatchFailure>,
     pub streaming_batch: Option<usize>,
     pub streaming_segments: usize,

@@ -195,7 +195,7 @@ pub async fn translate_image(
     } else {
         let mut instruction = format!(
         "Translate every readable text element in this image from {} to {}. Preserve all non-text pixels, composition, layout, visual style, font scale and colors. Replace the original text with the translation and return the edited image only.",
-        request.source_language, request.target_language
+        if request.source_language == "auto" { "the automatically detected source language" } else { &request.source_language }, request.target_language
         );
         instruction.push_str("\n\n");
         instruction.push_str(&build_messages(&data, request).0);
@@ -492,10 +492,17 @@ fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String
         .as_ref()
         .and_then(|id| data.prompts.iter().find(|prompt| &prompt.id == id))
         .map(|prompt| prompt.content.as_str())
-        .unwrap_or("Translate from {{source_language}} to {{target_language}}. Preserve the original meaning, formatting and markup. Return only the translation.\n\n{{glossary}}");
+        .unwrap_or(crate::models::DEFAULT_TRANSLATION_PROMPT);
     let render = |input: &str| {
         input
-            .replace("{{source_language}}", &request.source_language)
+            .replace(
+                "{{source_language}}",
+                if request.source_language == "auto" {
+                    "the automatically detected source language"
+                } else {
+                    &request.source_language
+                },
+            )
             .replace("{{target_language}}", &request.target_language)
             .replace(
                 "{{glossary}}",
@@ -1465,7 +1472,7 @@ mod tests {
 
         let (system, user) = build_messages(&AppData::default(), &request);
 
-        assert!(system.contains("Translate faithfully"));
+        assert!(system.contains("Automatically detect the source language"));
         assert!(system.ends_with("Additional instructions:\nUse a friendly tone."));
         assert_eq!(user, "Text to translate:\nHello");
     }

@@ -10,7 +10,8 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
-    await expect(page.locator("h1:visible")).toHaveCount(1);
+    await expect(page.getByRole("region", { name: "Translate text", exact: true })).toBeVisible();
+    await expect(page.locator(".translate-page .page-heading")).toHaveCount(0);
     await expect(page.locator(".app-shell")).toBeVisible();
     await expect(page).toHaveTitle("PromLex");
     await expect(page.locator(".brand-row strong")).toHaveText("PromLex");
@@ -21,11 +22,9 @@ for (const viewport of [
     const dimensions = await page.evaluate(() => ({
       viewport: document.documentElement.clientWidth,
       content: document.documentElement.scrollWidth,
-      heading: document.querySelector("h1:not([hidden])")?.textContent,
       shell: document.querySelector(".app-shell")?.getBoundingClientRect().toJSON(),
     }));
     expect(dimensions.content).toBeLessThanOrEqual(dimensions.viewport);
-    expect(dimensions.heading).toBeTruthy();
     expect(dimensions.shell?.width).toBeGreaterThanOrEqual(viewport.width - 1);
   });
 }
@@ -33,7 +32,7 @@ for (const viewport of [
 test("Simplified Chinese interface localizes the primary workflow", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("tranova-language", "zh-CN"));
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  await expect(page.locator("h1:visible")).toHaveText("文本翻译");
+  await expect(page.getByRole("region", { name: "文本翻译", exact: true })).toBeVisible();
   await expect(page.locator(".sidebar-nav")).toContainText("文件翻译");
   await expect(page.locator(".brand-row")).toContainText("AI 翻译工作台");
   await expect(page.locator(".brand-row strong")).toHaveText("语锚 · PromLex");
@@ -44,17 +43,17 @@ test("language options use native names and stay visible while typing", async ({
   await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
   await page.goto("/", { waitUntil: "domcontentloaded" });
 
-  const sourceLanguage = page.getByRole("combobox", { name: "Source language" });
+  await expect(page.getByRole("combobox", { name: "Source language", exact: true })).toHaveCount(0);
   const targetLanguage = page.getByRole("combobox", { name: "Target language" });
   await expect(targetLanguage).toHaveValue("简体中文");
   await targetLanguage.click();
   await targetLanguage.locator("..").getByRole("option", { name: "繁體中文 zh-TW" }).click();
   await expect(targetLanguage).toHaveValue("繁體中文");
 
-  await sourceLanguage.fill("custom language");
-  const options = sourceLanguage.locator("..").getByRole("option");
-  await expect(options).toHaveCount(13);
-  await expect(options).toContainText(["Auto detect", "English", "简体中文", "繁體中文", "日本語", "한국어", "Français", "Deutsch", "Español", "Русский", "العربية", "tlhIngan Hol", "吙煋呅"]);
+  await targetLanguage.fill("custom language");
+  const options = targetLanguage.locator("..").getByRole("option");
+  await expect(options).toHaveCount(12);
+  await expect(options).toContainText(["English", "简体中文", "繁體中文", "日本語", "한국어", "Français", "Deutsch", "Español", "Русский", "العربية", "tlhIngan Hol", "吙煋呅"]);
   await expect(page.locator(".translate-page .language-custom-hint")).toHaveText("You can also enter any language directly.");
 });
 
@@ -69,15 +68,36 @@ test("provider enabled checkbox has a visible label", async ({ page }) => {
   await expect(enabled).toBeChecked();
 });
 
+test("translation controls share a row and explain template use", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const options = page.locator(".translate-page .translation-options");
+  const prompt = await options.getByRole("combobox", { name: "Prompt", exact: true }).boundingBox();
+  const reasoning = await options.getByRole("combobox", { name: "Reasoning effort", exact: true }).boundingBox();
+  const glossary = await options.getByRole("group", { name: "Glossaries", exact: true }).boundingBox();
+  expect(Math.abs(prompt!.y - reasoning!.y)).toBeLessThan(2);
+  expect(Math.abs(prompt!.y - glossary!.y)).toBeLessThan(25);
+  await expect(options.getByRole("textbox", { name: "Translation instructions" })).toBeVisible();
+  await options.getByText("How to use templates", { exact: true }).click();
+  await expect(options.locator(".template-help-content")).toContainText("{{target_language}}");
+  await expect(options.locator(".template-help-content")).toContainText("{{text}}");
+  await expect(options.locator(".template-help-content")).toContainText("appended to the selected template");
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(page.locator(".files-page .page-heading")).toHaveCount(0);
+  await expect(page.locator(".files-page").getByRole("combobox", { name: "Source language" })).toHaveCount(0);
+});
 
-test("translation action sits above the source editor", async ({ page }) => {
+
+test("translation action sits beside the source label", async ({ page }) => {
   await page.goto("/", { waitUntil: "domcontentloaded" });
-  const button = page.locator(".translate-page .action-row button");
-  const editor = page.locator(".translate-page .editor-panel textarea");
+  const button = page.locator(".translate-page .source-header button");
+  const label = page.locator(".translate-page .source-header strong");
   await expect(button).toBeVisible();
   const actionBox = await button.boundingBox();
-  const editorBox = await editor.boundingBox();
-  expect(actionBox!.y + actionBox!.height).toBeLessThanOrEqual(editorBox!.y);
+  const labelBox = await label.boundingBox();
+  expect(actionBox!.x).toBeGreaterThan(labelBox!.x + labelBox!.width);
+  expect(Math.abs(actionBox!.y + actionBox!.height / 2 - labelBox!.y - labelBox!.height / 2)).toBeLessThan(2);
 });
 
 test("browser save as allows renaming the translated download", async ({ page }) => {

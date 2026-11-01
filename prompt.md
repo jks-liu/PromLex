@@ -173,6 +173,24 @@ Translated PDF text cannot fit its original layout at a readable font size (7.7p
 ```
 尝试修复，即使不能修复，出错的地方不翻译就行（在UI中用一个warning文本提示用户），直接失败体验太差
 
+
+### 2026年11月1日
+
+- 翻译后文本支持用户可控的markdown渲染
+- 文件翻译支持翻译文件夹
+- 文件翻译支持翻译压缩包
+- 压缩包支持zip，rar，7z，tar（包括tar.gz等）但翻译后的结果都是7z（包括文件夹翻译）
+- 文件夹/压缩包翻译支持可选的输出文件夹，实时输出已翻译文件
+- 若中途停止，支持根据输出文件夹已有文件跳过已翻译文件
+
+- 优化布局
+	* 删除页首的“Translate text”和“Translate with a selected AI, prompt and terminology set.”文本，文件翻译页面也类似
+	* 删除“Source language”，一律auto detect（默认翻译提示词也作适当调整）
+	* Reasoning effort和Glossaries也放到Prompt旁边
+	* 翻译按钮直接放到source文本旁边
+- Additional prompt旁加上提示如何使用模板。并且Additional prompt这个名字不太对吧
+
+
 ## TODO
 - 取消后再翻译可能有问题
 

@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -24,6 +24,8 @@ struct JobRecord {
     content: Option<Vec<u8>>,
     retry_context: Option<FileRetryContext>,
     cancel: CancellationToken,
+    completed_contents: Vec<Vec<u8>>,
+    output_directory: Option<PathBuf>,
 }
 
 impl FileJobManager {
@@ -52,12 +54,20 @@ impl FileJobManager {
             total_batches: 0,
             completed_batches: 0,
             preserved_pdf_pages: Vec::new(),
+            archive_pdf_warnings: Vec::new(),
+            completed_files: Vec::new(),
+            output_directory: None,
+            output_error: None,
             failed_batches: Vec::new(),
             streaming_batch: None,
             streaming_segments: 0,
             streaming_batch_segments: 0,
             streaming_text: None,
-            result_filename: translated_filename(filename),
+            result_filename: if crate::archives::is_archive(filename) {
+                crate::archives::result_filename(filename)
+            } else {
+                translated_filename(filename)
+            },
             media_type: mime_guess::from_path(filename)
                 .first_or_octet_stream()
                 .to_string(),
@@ -73,6 +83,8 @@ impl FileJobManager {
                 content: None,
                 retry_context: Some(retry_context),
                 cancel: CancellationToken::new(),
+                completed_contents: Vec::new(),
+                output_directory: None,
             },
         );
         status
@@ -123,6 +135,43 @@ impl FileJobManager {
             record.status.streaming_segments = progress.streaming_segments;
             record.status.streaming_batch_segments = progress.streaming_batch_segments;
             record.status.streaming_text = progress.streaming_text;
+            if let Some(file) = progress.completed_file {
+                let index = record
+                    .status
+                    .completed_files
+                    .iter()
+                    .position(|item| item.path == file.path);
+                let index = match index {
+                    Some(index) => {
+                        record.completed_contents[index] = file.bytes;
+                        record.status.completed_files[index].revision += 1;
+                        record.status.completed_files[index].resumed = file.resumed;
+                        index
+                    }
+                    None => {
+                        let id = record.completed_contents.len();
+                        record.completed_contents.push(file.bytes);
+                        record
+                            .status
+                            .completed_files
+                            .push(crate::models::CompletedFileStatus {
+                                id,
+                                path: file.path,
+                                revision: 1,
+                                resumed: file.resumed,
+                                saved_path: None,
+                            });
+                        id
+                    }
+                };
+                if record.output_directory.is_some()
+                    && !record.status.completed_files[index].resumed
+                {
+                    if let Err(error) = write_completed_file(record, index) {
+                        record.status.output_error = Some(error.to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -141,6 +190,7 @@ impl FileJobManager {
             record.status.completed_batches = result.total_batches;
             record.status.failed_batches = result.failed_batches;
             record.status.preserved_pdf_pages = result.preserved_pdf_pages;
+            record.status.archive_pdf_warnings = result.archive_pdf_warnings;
             record.status.streaming_batch = None;
             record.status.streaming_segments = 0;
             record.status.streaming_batch_segments = 0;
@@ -149,7 +199,11 @@ impl FileJobManager {
             record.status.media_type = result.media_type;
             record.status.error = None;
             record.content = Some(result.content);
-            record.retry_context = result.retry_context;
+            record.retry_context = if record.status.failed_batches.is_empty() {
+                None
+            } else {
+                result.retry_context
+            };
         }
     }
 
@@ -256,6 +310,46 @@ impl FileJobManager {
         ))
     }
 
+    pub fn completed_file(&self, id: &str, index: usize) -> Option<(String, Vec<u8>)> {
+        let jobs = self.inner.read();
+        let record = jobs.get(id)?;
+        Some((
+            record.status.completed_files.get(index)?.path.clone(),
+            record.completed_contents.get(index)?.clone(),
+        ))
+    }
+
+    pub fn set_output_directory(&self, id: &str, root: &Path) -> Result<FileJobStatus, io::Error> {
+        let root = root.canonicalize()?;
+        if !root.is_dir() {
+            return Err(io::Error::other("Output location is not a directory"));
+        }
+        let mut jobs = self.inner.write();
+        let record = jobs
+            .get_mut(id)
+            .ok_or_else(|| io::Error::other("File job was not found"))?;
+        if !crate::archives::is_archive(&record.status.filename) {
+            return Err(io::Error::other(
+                "Output folders are available for folder and archive jobs",
+            ));
+        }
+        if record.output_directory.is_none() {
+            record.status.output_directory = Some(root.to_string_lossy().into_owned());
+            record.output_directory = Some(root);
+        }
+        record.status.output_error = None;
+        for index in 0..record.completed_contents.len() {
+            if record.status.completed_files[index].resumed {
+                continue;
+            }
+            if let Err(error) = write_completed_file(record, index) {
+                record.status.output_error = Some(error.to_string());
+                break;
+            }
+        }
+        Ok(record.status.clone())
+    }
+
     pub fn save_to_path(&self, id: &str, destination: &Path) -> Result<FileJobStatus, io::Error> {
         if destination.as_os_str().is_empty() {
             return Err(io::Error::new(
@@ -294,6 +388,55 @@ impl FileJobManager {
         record.status.downloaded_path = Some(destination.to_string_lossy().into_owned());
         Ok(record.status.clone())
     }
+}
+
+fn write_completed_file(record: &mut JobRecord, index: usize) -> Result<(), io::Error> {
+    let root = record
+        .output_directory
+        .as_ref()
+        .ok_or_else(|| io::Error::other("No output directory"))?;
+    let entry = &mut record.status.completed_files[index];
+    let parts = entry.path.split('/').collect::<Vec<_>>();
+    if parts.iter().any(|part| {
+        part.is_empty() || matches!(*part, "." | "..") || part.contains(['\\', ':', '\0'])
+    }) {
+        return Err(io::Error::other("Unsafe output path"));
+    }
+    let mut destination = root.clone();
+    for part in &parts[..parts.len() - 1] {
+        destination.push(part);
+        match fs::create_dir(&destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&destination)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(io::Error::other("Output path contains a link or file"));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    destination.push(parts[parts.len() - 1]);
+    if entry.saved_path.is_some() && fs::symlink_metadata(&destination)?.file_type().is_symlink() {
+        return Err(io::Error::other("Output file is a link"));
+    }
+    use std::io::Write;
+    let mut temporary = tempfile::NamedTempFile::new_in(destination.parent().unwrap_or(root))?;
+    temporary.write_all(&record.completed_contents[index])?;
+    let incomplete = fs::symlink_metadata(&destination).is_ok_and(|metadata| {
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() == 0
+    });
+    if entry.saved_path.is_some() || incomplete {
+        temporary
+            .persist(&destination)
+            .map_err(|error| error.error)?;
+    } else {
+        temporary
+            .persist_noclobber(&destination)
+            .map_err(|error| error.error)?;
+    }
+    entry.saved_path = Some(destination.to_string_lossy().into_owned());
+    Ok(())
 }
 
 fn job_id() -> String {
@@ -335,6 +478,93 @@ mod tests {
     };
 
     #[test]
+    fn completed_members_are_written_before_the_job_finishes_and_existing_files_are_safe() {
+        let jobs = FileJobManager::new();
+        let context = FileRetryContext::new(
+            "folder.zip",
+            vec![],
+            crate::models::TranslateRequest {
+                text: String::new(),
+                source_language: "en".into(),
+                target_language: "zh-CN".into(),
+                provider_id: "test".into(),
+                prompt_id: None,
+                additional_prompt: String::new(),
+                glossary_ids: vec![],
+                reasoning_effort: "none".into(),
+                summarize: false,
+                context_summary: None,
+            },
+            FileOutputMode::Translated,
+        );
+        let job = jobs.create("folder.zip", FileOutputMode::Translated, None, context);
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        fs::write(
+            directory.path().join("nested/existing.txt"),
+            b"existing translation",
+        )
+        .unwrap();
+        jobs.set_output_directory(&job.id, directory.path())
+            .unwrap();
+        let progress = |path: &str, bytes: &[u8], resumed| crate::models::FileProgress {
+            stage: "translating".into(),
+            total_segments: 2,
+            translated_segments: 1,
+            failed_segments: 0,
+            skipped_segments: 0,
+            total_batches: 2,
+            completed_batches: 1,
+            streaming_batch: None,
+            streaming_segments: 0,
+            streaming_batch_segments: 0,
+            streaming_text: None,
+            completed_file: Some(crate::models::CompletedFile {
+                path: path.into(),
+                bytes: bytes.to_vec(),
+                resumed,
+            }),
+        };
+        jobs.update_progress(&job.id, progress("nested/new.txt", b"translation", false));
+        assert!(matches!(
+            jobs.get(&job.id).unwrap().state,
+            crate::models::FileJobState::Processing
+        ));
+        assert_eq!(
+            fs::read(directory.path().join("nested/new.txt")).unwrap(),
+            b"translation"
+        );
+        assert_eq!(jobs.completed_file(&job.id, 0).unwrap().1, b"translation");
+        jobs.update_progress(
+            &job.id,
+            progress("nested/new.txt", b"updated translation", false),
+        );
+        assert_eq!(
+            fs::read(directory.path().join("nested/new.txt")).unwrap(),
+            b"updated translation"
+        );
+        jobs.update_progress(
+            &job.id,
+            progress("nested/existing.txt", b"resumed content", true),
+        );
+        assert_eq!(
+            fs::read(directory.path().join("nested/existing.txt")).unwrap(),
+            b"existing translation"
+        );
+        jobs.update_progress(
+            &job.id,
+            progress("nested/existing.txt", b"must not overwrite", false),
+        );
+        assert!(jobs.get(&job.id).unwrap().output_error.is_some());
+        assert_eq!(
+            fs::read(directory.path().join("nested/existing.txt")).unwrap(),
+            b"existing translation"
+        );
+        jobs.update_progress(&job.id, progress("../outside.txt", b"unsafe", false));
+        assert!(jobs.get(&job.id).unwrap().output_error.is_some());
+    }
+
+    #[test]
     fn completed_file_can_be_saved_and_reports_its_path() {
         let jobs = FileJobManager::new();
         let queued = jobs.create(
@@ -371,6 +601,7 @@ mod tests {
                 total_batches: 1,
                 failed_segments: 0,
                 preserved_pdf_pages: Vec::new(),
+                archive_pdf_warnings: Vec::new(),
                 failed_batches: Vec::new(),
                 retry_context: None,
             },
