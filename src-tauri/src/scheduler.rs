@@ -16,7 +16,8 @@ pub enum Priority {
 
 #[derive(Clone)]
 pub struct AiScheduler {
-    sender: mpsc::UnboundedSender<Command>,
+    sender: mpsc::UnboundedSender<(Command, Option<AppStore>)>,
+    log_store: Option<AppStore>,
 }
 
 enum Command {
@@ -88,7 +89,23 @@ impl AiScheduler {
     pub fn new(store: AppStore) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         tokio::spawn(run_scheduler(store, receiver));
-        Self { sender }
+        Self {
+            sender,
+            log_store: None,
+        }
+    }
+
+    pub fn with_log_store(&self, store: AppStore) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            log_store: Some(store),
+        }
+    }
+
+    fn send(&self, command: Command) -> Result<(), AiError> {
+        self.sender
+            .send((command, self.log_store.clone()))
+            .map_err(|_| AiError::Message("AI scheduler is unavailable".to_string()))
     }
 
     pub async fn translate(
@@ -106,14 +123,12 @@ impl AiScheduler {
         stream: Option<StreamCallback>,
     ) -> Result<TranslationResult, AiError> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::Translate {
-                request,
-                response,
-                priority,
-                stream,
-            })
-            .map_err(|_| AiError::Message("AI scheduler is unavailable".to_string()))?;
+        self.send(Command::Translate {
+            request,
+            response,
+            priority,
+            stream,
+        })?;
         receiver
             .await
             .map_err(|_| AiError::Message("AI scheduler stopped unexpectedly".to_string()))?
@@ -127,15 +142,13 @@ impl AiScheduler {
         stream: Option<StreamCallback>,
     ) -> Result<Vec<String>, AiError> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::TranslateBatch {
-                request,
-                texts,
-                response,
-                priority,
-                stream,
-            })
-            .map_err(|_| AiError::Message("AI scheduler is unavailable".to_string()))?;
+        self.send(Command::TranslateBatch {
+            request,
+            texts,
+            response,
+            priority,
+            stream,
+        })?;
         receiver
             .await
             .map_err(|_| AiError::Message("AI scheduler stopped unexpectedly".to_string()))?
@@ -148,14 +161,12 @@ impl AiScheduler {
         priority: Priority,
     ) -> Result<String, AiError> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::Summarize {
-                request,
-                text,
-                response,
-                priority,
-            })
-            .map_err(|_| AiError::Message("AI scheduler is unavailable".to_string()))?;
+        self.send(Command::Summarize {
+            request,
+            text,
+            response,
+            priority,
+        })?;
         receiver
             .await
             .map_err(|_| AiError::Message("AI scheduler stopped unexpectedly".to_string()))?
@@ -169,15 +180,13 @@ impl AiScheduler {
         priority: Priority,
     ) -> Result<Vec<u8>, AiError> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::TranslateImage {
-                request,
-                filename,
-                image,
-                response,
-                priority,
-            })
-            .map_err(|_| AiError::Message("AI scheduler is unavailable".to_string()))?;
+        self.send(Command::TranslateImage {
+            request,
+            filename,
+            image,
+            response,
+            priority,
+        })?;
         receiver
             .await
             .map_err(|_| AiError::Message("AI scheduler stopped unexpectedly".to_string()))?
@@ -200,6 +209,7 @@ enum WorkResult {
 }
 
 struct PendingWork {
+    log_store: Option<AppStore>,
     provider_id: String,
     priority: Priority,
     work: Work,
@@ -211,7 +221,10 @@ struct ActiveCounts {
     low: usize,
 }
 
-async fn run_scheduler(store: AppStore, mut receiver: mpsc::UnboundedReceiver<Command>) {
+async fn run_scheduler(
+    store: AppStore,
+    mut receiver: mpsc::UnboundedReceiver<(Command, Option<AppStore>)>,
+) {
     let (completion_sender, mut completion_receiver) = mpsc::unbounded_channel();
     let mut high: VecDeque<PendingWork> = VecDeque::new();
     let mut low: VecDeque<PendingWork> = VecDeque::new();
@@ -228,7 +241,7 @@ async fn run_scheduler(store: AppStore, mut receiver: mpsc::UnboundedReceiver<Co
                 Priority::High => counts.high += 1,
                 Priority::Low => counts.low += 1,
             }
-            let store = store.clone();
+            let store = pending.log_store.unwrap_or_else(|| store.clone());
             let completion_sender = completion_sender.clone();
             tokio::spawn(async move {
                 let completion = execute_work(store, provider_id, priority, pending.work).await;
@@ -270,7 +283,11 @@ async fn run_scheduler(store: AppStore, mut receiver: mpsc::UnboundedReceiver<Co
     }
 }
 
-fn enqueue(command: Command, high: &mut VecDeque<PendingWork>, low: &mut VecDeque<PendingWork>) {
+fn enqueue(
+    (command, log_store): (Command, Option<AppStore>),
+    high: &mut VecDeque<PendingWork>,
+    low: &mut VecDeque<PendingWork>,
+) {
     let (priority, work) = match command {
         Command::Translate {
             request,
@@ -330,6 +347,7 @@ fn enqueue(command: Command, high: &mut VecDeque<PendingWork>, low: &mut VecDequ
         ),
     };
     let pending = PendingWork {
+        log_store,
         provider_id: work.provider_id().to_string(),
         priority,
         work,

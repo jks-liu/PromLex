@@ -449,6 +449,8 @@ fn record_ai_log<E: std::fmt::Display>(
         id: format!("ai-{}-{}", unix_timestamp_nanos(), std::process::id()),
         timestamp: unix_timestamp_millis(),
         operation: operation.to_string(),
+        job_id: None,
+        filename: None,
         provider: provider.name.clone(),
         model: provider.model.clone(),
         request,

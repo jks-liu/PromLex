@@ -23,6 +23,15 @@ button, input, select, textarea { outline-color: #1c7c67; }
 .sidebar-nav button { display: flex; gap: 12px; align-items: center; width: 100%; border: 0; border-radius: 5px; background: transparent; color: #b8c7ce; padding: 10px 11px; text-align: left; font-size: 14px; }
 .sidebar-nav button:hover { color: #fff; background: #23343e; }
 .sidebar-nav button.active { background: #1c7c67; color: #fff; }
+.sidebar-toggle { display: flex; align-items: center; gap: 12px; border: 0; background: transparent; color: #b8c7ce; padding: 10px 11px; margin-top: 12px; border-radius: 5px; }
+.sidebar-toggle:hover { background: #23343e; color: #fff; }
+.sidebar-nav svg, .sidebar-toggle svg { flex-shrink: 0; }
+@media (min-width: 721px) {
+  .sidebar-collapsed { width: 72px; flex-basis: 72px; padding-inline: 10px; }
+  .sidebar-collapsed .brand-row { padding-inline: 5px; }
+  .sidebar-collapsed .brand-text, .sidebar-collapsed .sidebar-nav span, .sidebar-collapsed .connection-label, .sidebar-collapsed .sidebar-toggle span { display: none; }
+  .sidebar-collapsed .sidebar-nav button, .sidebar-collapsed .sidebar-toggle, .sidebar-collapsed .connection-state { justify-content: center; }
+}
 .connection-state { margin-top: auto; display: flex; align-items: center; gap: 8px; color: #aab9c0; font-size: 12px; padding: 12px 8px 3px; }
 .status-dot { display: inline-block; height: 8px; width: 8px; border-radius: 50%; background: #c66a52; }
 .status-dot.online { background: #65b982; }
@@ -231,6 +240,7 @@ textarea { padding: 12px; resize: vertical; line-height: 1.55; }
   .glossary-picker { grid-column: 1 / -1; }
 }
 @media (max-width: 720px) {
+  .sidebar-toggle { display: none; }
   .sidebar { position: fixed; z-index: 15; inset: 0 auto 0 0; transform: translateX(-100%); transition: transform .18s ease; box-shadow: 6px 0 24px rgb(0 0 0 / .2); }
   .sidebar.sidebar-open { transform: translateX(0); }
   .mobile-overlay { display: block; position: fixed; z-index: 14; inset: 0; background: rgb(0 0 0 / .32); }
@@ -311,3 +321,8 @@ textarea { padding: 12px; resize: vertical; line-height: 1.55; }
 @media (max-width: 720px) {
   .translate-page { min-height: calc(100vh - 126px); }
 }
+
+.file-log-group { border: 1px solid #dce3e8; border-radius: 6px; padding: 14px; min-width: 0; }
+.file-log-group summary { cursor: pointer; overflow-wrap: anywhere; }
+.file-log-group[open] summary { margin-bottom: 14px; }
+.file-log-id { display: block; font-size: 12px; color: #667580; margin-top: 5px; }

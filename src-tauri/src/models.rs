@@ -489,6 +489,10 @@ pub struct AiConversationLog {
     pub id: String,
     pub timestamp: String,
     pub operation: String,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub filename: Option<String>,
     pub provider: String,
     pub model: String,
     pub request: String,
@@ -497,6 +501,16 @@ pub struct AiConversationLog {
     pub success: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl AiConversationLog {
+    pub fn is_file(&self) -> bool {
+        self.job_id.is_some()
+            || matches!(
+                self.operation.as_str(),
+                "batch translation" | "document summary" | "image translation"
+            )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

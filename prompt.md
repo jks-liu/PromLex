@@ -191,6 +191,14 @@ Translated PDF text cannot fit its original layout at a readable font size (7.7p
 - Additional prompt旁加上提示如何使用模板。并且Additional prompt这个名字不太对吧
 
 
+### 2026年11月3日
+
+- 左侧的tab应该可以折叠
+- 文件翻译时markdown的分割是按行的，不符合md的语义。当以原文+译文模式输出时格式混乱。
+- 原文+译文模式输出时，原文和译文之间应有分隔符，分隔符随文件格式不同而不同，力求输出内容清晰
+- github ci自动生成的release中，*.AppImage格式比其它格式都大，八十多M，其它格式一般也就十几M，这是为什么？
+- ai交互的log请细分成文本翻译log和文件翻译log，文件翻译log再按照文件job分组
+
 ## TODO
 - 取消后再翻译可能有问题
 

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Bot, Bug, FileText, History, Languages, Library, Menu, Settings, Sparkles, X } from "lucide-react";
+import { Bot, Bug, FileText, History, Languages, Library, Menu, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -16,6 +16,13 @@ interface LayoutProps {
 export function Layout({ view, onViewChange, children, connected, showLogs }: LayoutProps) {
   const { t } = useTranslation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("promlex-sidebar-collapsed") === "true");
+  const toggleSidebar = () => {
+    setCollapsed((current) => {
+      localStorage.setItem("promlex-sidebar-collapsed", String(!current));
+      return !current;
+    });
+  };
   const items: Array<{ id: View; icon: typeof Languages; label: string }> = [
     { id: "translate", icon: Languages, label: t("nav.translate") },
     { id: "files", icon: FileText, label: t("nav.files") },
@@ -34,10 +41,10 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
 
   return (
     <div className="app-shell">
-      <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
+      <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""} ${collapsed ? "sidebar-collapsed" : ""}`}>
         <div className="brand-row">
           <img className="brand-mark" src="/app-icon.png" alt="" />
-          <div>
+          <div className="brand-text">
             <strong>{t("common.productName")}</strong>
             <span>{t("common.productSubtitle")}</span>
           </div>
@@ -45,17 +52,21 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
             <X size={19} />
           </button>
         </div>
+        <button className="sidebar-toggle" onClick={toggleSidebar} aria-expanded={!collapsed} aria-label={t(collapsed ? "common.expandSidebar" : "common.collapseSidebar")} title={t(collapsed ? "common.expandSidebar" : "common.collapseSidebar")}>
+          {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          <span>{t("common.collapseSidebar")}</span>
+        </button>
         <nav className="sidebar-nav">
           {items.map(({ id, icon: Icon, label }) => (
-            <button key={id} className={view === id ? "active" : ""} onClick={() => select(id)}>
+            <button key={id} className={view === id ? "active" : ""} onClick={() => select(id)} title={label} aria-label={label} aria-current={view === id ? "page" : undefined}>
               <Icon size={18} />
               <span>{label}</span>
             </button>
           ))}
         </nav>
-        <div className="connection-state">
+        <div className="connection-state" title={connected ? t("common.ready") : t("common.error")}>
           <span className={connected ? "status-dot online" : "status-dot"} />
-          {connected ? t("common.ready") : t("common.error")}
+          <span className="connection-label">{connected ? t("common.ready") : t("common.error")}</span>
         </div>
       </aside>
       {mobileOpen && <div className="mobile-overlay" onClick={() => setMobileOpen(false)} />}

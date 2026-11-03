@@ -3,6 +3,72 @@ import { createServer } from "node:http";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+test("semantic file translation keeps format separators and records the actual job in AI logs", async ({ request }) => {
+  const received: string[] = [];
+  const server = createServer((incoming, response) => {
+    let body = "";
+    incoming.on("data", (chunk) => { body += chunk.toString(); });
+    incoming.on("end", () => {
+      const payload = JSON.parse(body);
+      const text: string = payload.messages.find((message: { role: string }) => message.role === "user").content;
+      received.push(text);
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ choices: [{ message: { content: text.replaceAll("Hello", "你好").replaceAll("World", "世界").replaceAll("Name", "名称").replaceAll("Value", "数值") } }] }));
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No mock address");
+  const providerId = "semantic-files-e2e";
+  const originalSettings = (await (await request.get("/api/bootstrap")).json()).settings;
+  try {
+    expect((await request.put("/api/settings", { data: { ...originalSettings, loggingEnabled: true } })).ok()).toBeTruthy();
+    expect((await request.put("/api/providers", { data: {
+      id: providerId, name: "Semantic file test", baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      model: "qwen3", reasoningParser: "qwen3", apiKey: "", proxyMode: "none", enabled: true,
+      supportsImages: false, contextSize: 4096, maxSegments: 1, maxConcurrent: 2, textTranslationModel: false,
+    } })).ok()).toBeTruthy();
+    const options = { providerId, sourceLanguage: "en", targetLanguage: "zh-CN", outputMode: "bilingual" };
+    const fixtures = [
+      { name: "semantic.md", source: "# Hello\n\nHello\nWorld\n\n- Hello\n  - World\n\n| Name | Value |\n| --- | --- |\n| Hello | World |\n\n```txt\nHello code\n```\n", expected: ["# Hello\n\n---\n\n# 你好", "Hello\nWorld\n\n---\n\n你好\n世界", "- Hello\n  - World\n\n---\n\n- 你好\n  - 世界", "| Hello | World |\n\n---\n\n| 名称 | 数值 |", "```txt\nHello code\n```"] },
+      { name: "semantic.html", source: "<p title='Hello'>Hello &amp; World</p><script>const x = 'Hello';</script>", expected: ["<p title=\"Hello\">Hello &amp; World<br>─────<br>你好 &amp; 世界</p>", "<script>const x = 'Hello';</script>"] },
+      { name: "semantic.json", source: '{"message":"Hello"}', expected: ['"Hello | 你好"'] },
+      { name: "semantic.csv", source: "Hello,World\n", expected: ["Hello | 你好,World | 世界"] },
+      { name: "semantic.srt", source: "1\n00:00:01,000 --> 00:00:02,000\nHello\n", expected: ["00:00:01,000 --> 00:00:02,000\nHello\n—\n你好"] },
+      { name: "semantic.txt", source: "Hello\n", expected: ["Hello\n-----\n你好"] },
+    ];
+    for (const fixture of fixtures) {
+      const submitted = await request.post("/api/translate-file", { multipart: {
+        file: { name: fixture.name, mimeType: "text/plain", buffer: Buffer.from(fixture.source) },
+        options: JSON.stringify(options),
+      } });
+      expect(submitted.ok()).toBeTruthy();
+      const job = await submitted.json();
+      await expect.poll(async () => (await (await request.get(`/api/file-jobs/${job.id}`)).json()).state).toBe("completed");
+      const output = (await (await request.get(`/api/file-jobs/${job.id}/download`)).body()).toString();
+      for (const expected of fixture.expected) expect(output).toContain(expected);
+      const logs = await (await request.get("/api/logs?kind=file&pageSize=100")).json();
+      const jobLogs = logs.items.filter((entry: { jobId: string }) => entry.jobId === job.id);
+      expect(jobLogs.length).toBeGreaterThan(0);
+      expect(jobLogs.every((entry: { filename: string }) => entry.filename === fixture.name)).toBeTruthy();
+      const textLogs = await (await request.get("/api/logs?kind=text&pageSize=100")).json();
+      expect(textLogs.items.some((entry: { jobId?: string }) => entry.jobId === job.id)).toBeFalsy();
+    }
+    expect(received).toContain("Hello\nWorld");
+    expect(received).toContain("- Hello\n  - World");
+    expect(received.some((text) => text.includes("Hello code"))).toBeFalsy();
+    expect((await request.post("/api/translate", { data: { ...options, text: "Hello text" } })).ok()).toBeTruthy();
+    const textLogs = await (await request.get("/api/logs?kind=text&pageSize=100")).json();
+    const textLog = textLogs.items.find((entry: { provider: string }) => entry.provider === "Semantic file test");
+    expect(textLog.jobId).toBeNull();
+  } finally {
+    await request.put("/api/settings", { data: originalSettings });
+    await request.delete(`/api/providers/${providerId}`);
+    server.closeAllConnections();
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
 test("folder controls remain usable on narrow screens", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
   await page.setViewportSize({ width: 390, height: 844 });

@@ -343,8 +343,8 @@ async fn translate_file(
         format!("Queued file job {} for {}", job_id, filename),
     );
     let jobs = state.jobs.clone();
-    let store = state.store.clone();
-    let scheduler = state.scheduler.clone();
+    let store = state.store.for_file_job(&job_id, &filename);
+    let scheduler = state.scheduler.with_log_store(store.clone());
     let file_queue = state.file_queue.clone();
     tokio::spawn(async move {
         let cancel = match jobs.cancellation_token(&job_id) {
@@ -447,8 +447,8 @@ async fn retry_file_job(
         format!("Retrying failed batches for file job {id}"),
     );
     let jobs = state.jobs.clone();
-    let store = state.store.clone();
-    let scheduler = state.scheduler.clone();
+    let store = state.store.for_file_job(&id, &status.filename);
+    let scheduler = state.scheduler.with_log_store(store.clone());
     let file_queue = state.file_queue.clone();
     let restore_context = context.clone();
     let queue_restore_context = restore_context.clone();
@@ -629,8 +629,10 @@ async fn logs(
             let (items, total) = state.store.system_logs_page(page, page_size);
             Json(log_page(items, page, page_size, total)).into_response()
         }
-        "conversations" => {
-            let (items, total) = state.store.ai_conversations_page(page, page_size);
+        "conversations" | "text" | "file" => {
+            let (items, total) = state
+                .store
+                .ai_conversations_page(&query.kind, page, page_size);
             Json(log_page(items, page, page_size, total)).into_response()
         }
         _ => return Err(ApiError::bad_request("Unknown log kind")),

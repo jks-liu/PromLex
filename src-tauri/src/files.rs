@@ -116,6 +116,7 @@ struct BatchState {
     cached_batches: HashMap<usize, CachedBatch>,
     failed_batches: Vec<FileBatchFailure>,
     cancel: CancellationToken,
+    bilingual_separator: &'static str,
 }
 
 impl Default for BatchState {
@@ -124,6 +125,7 @@ impl Default for BatchState {
             cached_batches: HashMap::new(),
             failed_batches: Vec::new(),
             cancel: CancellationToken::new(),
+            bilingual_separator: "\n-----\n",
         }
     }
 }
@@ -199,6 +201,11 @@ async fn translate_file_with_cache(
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
+    batch_state.bilingual_separator = match extension.as_str() {
+        "csv" | "json" => " | ",
+        "srt" | "vtt" => "\n—\n",
+        _ => "\n-----\n",
+    };
     let mut counts = Counts {
         stage: "preparing".to_string(),
         ..Counts::default()
@@ -305,7 +312,31 @@ async fn translate_file_with_cache(
             )
             .await?
         }
-        "txt" | "md" | "markdown" | "html" | "htm" => {
+        "md" | "markdown" => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| FileError::Message("Only UTF-8 text files are supported".into()))?;
+            let blocks = crate::markdown::translation_blocks(text);
+            let mut markdown_options = options.clone();
+            markdown_options.additional_prompt.push_str("\nPreserve all Markdown syntax, indentation, links, code, list markers and table structure. Return only the translated Markdown block.");
+            let translated = translate_fragments(
+                store, scheduler,
+                blocks.iter().map(|range| text[range.clone()].to_string()).collect(),
+                &markdown_options, FileOutputMode::Translated,
+                &mut counts, &progress, &mut batch_state,
+            ).await?;
+            crate::markdown::render(text, &blocks, &translated, output_mode == FileOutputMode::Bilingual).into_bytes()
+        }
+        "html" | "htm" => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| FileError::Message("Only UTF-8 text files are supported".into()))?;
+            let translated = translate_fragments(
+                store, scheduler, crate::html::translation_texts(text),
+                &options, FileOutputMode::Translated,
+                &mut counts, &progress, &mut batch_state,
+            ).await?;
+            crate::html::render(text, &translated, output_mode == FileOutputMode::Bilingual)?
+        }
+        "txt" => {
             translate_plain_file(
                 store,
                 scheduler,
@@ -2329,7 +2360,12 @@ async fn translate_fragments(
                 )
             })
             .collect::<String>();
-        output.push(render_fragment(&fragment.source, &translated, output_mode));
+        output.push(render_fragment_with_separator(
+            &fragment.source,
+            &translated,
+            output_mode,
+            state.bilingual_separator,
+        ));
     }
     Ok(output)
 }
@@ -2596,7 +2632,17 @@ fn partial_batch_item_count(text: &str) -> usize {
     }
 }
 
+#[cfg(test)]
 fn render_fragment(source: &str, translated: &str, output_mode: FileOutputMode) -> String {
+    render_fragment_with_separator(source, translated, output_mode, "\n-----\n")
+}
+
+fn render_fragment_with_separator(
+    source: &str,
+    translated: &str,
+    output_mode: FileOutputMode,
+    separator: &str,
+) -> String {
     if output_mode == FileOutputMode::Translated {
         return restore_surrounding_whitespace(source, translated);
     }
@@ -2605,9 +2651,10 @@ fn render_fragment(source: &str, translated: &str, output_mode: FileOutputMode) 
         source.to_string()
     } else {
         format!(
-            "{}{}\n{}{}{}",
+            "{}{}{}{}{}{}",
             leading,
             content,
+            separator,
             leading,
             translated.trim(),
             trailing
@@ -3217,7 +3264,7 @@ mod tests {
     fn bilingual_output_keeps_source_and_translation_whitespace() {
         assert_eq!(
             render_fragment("  hello ", "你好", FileOutputMode::Bilingual),
-            "  hello\n  你好 "
+            "  hello\n-----\n  你好 "
         );
         assert_eq!(
             render_fragment("  hello ", "你好", FileOutputMode::Translated),

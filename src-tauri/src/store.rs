@@ -15,6 +15,7 @@ use crate::models::{
 #[derive(Clone)]
 pub struct AppStore {
     inner: Arc<StoreInner>,
+    file_log_context: Option<(String, String)>,
 }
 
 struct StoreInner {
@@ -49,6 +50,7 @@ impl AppStore {
         };
         data.upgrade_default_prompt();
         let store = Self {
+            file_log_context: None,
             inner: Arc::new(StoreInner {
                 path,
                 data: RwLock::new(data),
@@ -60,6 +62,13 @@ impl AppStore {
 
     pub fn snapshot(&self) -> AppData {
         self.inner.data.read().clone()
+    }
+
+    pub fn for_file_job(&self, job_id: &str, filename: &str) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            file_log_context: Some((job_id.to_string(), filename.to_string())),
+        }
     }
 
     pub fn settings(&self) -> AppSettings {
@@ -91,21 +100,44 @@ impl AppStore {
 
     pub fn ai_conversations_page(
         &self,
+        kind: &str,
         page: usize,
         page_size: usize,
     ) -> (Vec<AiConversationLog>, usize) {
         let data = self.inner.data.read();
-        (
-            page_slice(&data.ai_conversations, page, page_size),
-            data.ai_conversations.len(),
-        )
+        let entries: Vec<_> = data
+            .ai_conversations
+            .iter()
+            .filter(|entry| log_matches(entry, kind))
+            .cloned()
+            .collect();
+        if kind != "file" {
+            return (page_slice(&entries, page, page_size), entries.len());
+        }
+        // Page by jobs so all retained conversations for a job stay together.
+        let mut jobs = Vec::new();
+        for entry in &entries {
+            let key = entry.job_id.as_deref().unwrap_or("");
+            if !jobs.contains(&key) {
+                jobs.push(key);
+            }
+        }
+        let selected = page_slice(&jobs, page, page_size);
+        let items = entries
+            .iter()
+            .filter(|entry| selected.contains(&entry.job_id.as_deref().unwrap_or("")))
+            .cloned()
+            .collect();
+        (items, jobs.len())
     }
 
     pub fn delete_log(&self, kind: &str, id: &str) -> Result<(), io::Error> {
         let mut data = self.inner.data.write();
         match kind {
             "system" => data.system_logs.retain(|entry| entry.id != id),
-            "conversations" => data.ai_conversations.retain(|entry| entry.id != id),
+            "conversations" | "text" | "file" => data
+                .ai_conversations
+                .retain(|entry| !log_matches(entry, kind) || entry.id != id),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -128,9 +160,9 @@ impl AppStore {
         let mut data = self.inner.data.write();
         match kind {
             "system" => data.system_logs.retain(|entry| retain(&entry.timestamp)),
-            "conversations" => data
+            "conversations" | "text" | "file" => data
                 .ai_conversations
-                .retain(|entry| retain(&entry.timestamp)),
+                .retain(|entry| !log_matches(entry, kind) || retain(&entry.timestamp)),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -163,7 +195,11 @@ impl AppStore {
         let _ = self.persist();
     }
 
-    pub fn add_ai_conversation(&self, entry: AiConversationLog) {
+    pub fn add_ai_conversation(&self, mut entry: AiConversationLog) {
+        if let Some((job_id, filename)) = &self.file_log_context {
+            entry.job_id = Some(job_id.clone());
+            entry.filename = Some(filename.clone());
+        }
         let mut data = self.inner.data.write();
         if !data.settings.logging_enabled {
             return;
@@ -446,6 +482,15 @@ fn page_slice<T: Clone>(items: &[T], page: usize, page_size: usize) -> Vec<T> {
     items.iter().skip(start).take(page_size).cloned().collect()
 }
 
+fn log_matches(entry: &AiConversationLog, kind: &str) -> bool {
+    match kind {
+        "text" => !entry.is_file(),
+        "file" => entry.is_file(),
+        "conversations" => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, sync::Arc};
@@ -453,7 +498,72 @@ mod tests {
     use parking_lot::RwLock;
 
     use super::{AppStore, StoreInner};
-    use crate::models::{AppData, AppSettings, SystemLogEntry};
+    use crate::models::{AiConversationLog, AppData, AppSettings, SystemLogEntry};
+
+    #[test]
+    fn file_logs_keep_job_context_across_clones_retries_and_pagination() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AppStore {
+            file_log_context: None,
+            inner: Arc::new(StoreInner {
+                path: directory.path().join("data.json"),
+                data: RwLock::new(AppData {
+                    settings: AppSettings {
+                        logging_enabled: true,
+                        ..AppSettings::default()
+                    },
+                    ..AppData::default()
+                }),
+            }),
+        };
+        let entry = |id: &str, timestamp: &str| AiConversationLog {
+            id: id.into(),
+            timestamp: timestamp.into(),
+            operation: "translation".into(),
+            job_id: None,
+            filename: None,
+            provider: "test".into(),
+            model: "test".into(),
+            request: "source".into(),
+            response: "translated".into(),
+            duration_ms: 1,
+            success: true,
+            error: None,
+        };
+        let first = store.for_file_job("job-1", "same.md");
+        let second = store.for_file_job("job-2", "same.md");
+        first.clone().add_ai_conversation(entry("first", "1000"));
+        second.add_ai_conversation(entry("second", "2000"));
+        store.add_ai_conversation(entry("text", "3000"));
+        store
+            .for_file_job("job-1", "same.md")
+            .add_ai_conversation(entry("retry", "4000"));
+
+        let (page, total) = store.ai_conversations_page("file", 1, 1);
+        assert_eq!(total, 2);
+        assert_eq!(
+            page.iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["retry", "first"]
+        );
+        assert!(page
+            .iter()
+            .all(|entry| entry.job_id.as_deref() == Some("job-1")
+                && entry.filename.as_deref() == Some("same.md")));
+        let (page, _) = store.ai_conversations_page("file", 2, 1);
+        assert_eq!(page[0].id, "second");
+        assert_eq!(store.ai_conversations_page("text", 1, 20).0[0].id, "text");
+
+        store.delete_log("text", "first").unwrap();
+        assert_eq!(store.ai_conversations_page("file", 1, 1).0.len(), 2);
+        store.clear_logs("file", Some(3000)).unwrap();
+        assert_eq!(store.ai_conversations_page("file", 1, 20).0.len(), 1);
+        assert_eq!(store.ai_conversations_page("text", 1, 20).1, 1);
+        store.clear_logs("text", None).unwrap();
+        assert_eq!(store.ai_conversations_page("text", 1, 20).1, 0);
+        assert_eq!(store.ai_conversations_page("file", 1, 20).1, 1);
+    }
 
     #[test]
     fn settings_can_be_saved_repeatedly_on_windows() {
@@ -468,6 +578,7 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let path = directory.join("data.json");
         let store = AppStore {
+            file_log_context: None,
             inner: Arc::new(StoreInner {
                 path: path.clone(),
                 data: RwLock::new(AppData::default()),
@@ -514,6 +625,7 @@ mod tests {
             ..AppData::default()
         };
         let store = AppStore {
+            file_log_context: None,
             inner: Arc::new(StoreInner {
                 path: path.clone(),
                 data: RwLock::new(data),

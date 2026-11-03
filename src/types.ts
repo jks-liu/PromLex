@@ -175,6 +175,8 @@ export interface AiConversationLog {
   id: string;
   timestamp: string;
   operation: string;
+  jobId?: string;
+  filename?: string;
   provider: string;
   model: string;
   request: string;
@@ -189,7 +191,7 @@ export interface LogsData {
   conversations: AiConversationLog[];
 }
 
-export type LogKind = "system" | "conversations";
+export type LogKind = "system" | "text" | "file";
 
 export interface LogPage<T> {
   items: T[];

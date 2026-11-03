@@ -1,5 +1,57 @@
 import { expect, test } from "@playwright/test";
 
+test("sidebar collapse persists and navigation stays accessible on desktop and mobile", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+  await expect(page.locator(".sidebar")).toHaveClass(/sidebar-collapsed/);
+  await expect(page.locator(".sidebar-nav button span").first()).toBeHidden();
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(page.locator(".files-page")).toBeVisible();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("button", { name: "Expand sidebar", exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Open menu" }).click();
+  await expect(page.locator(".sidebar-nav button span").first()).toBeVisible();
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(page.locator(".files-page")).toBeVisible();
+  await expect(page.locator(".mobile-overlay")).toHaveCount(0);
+});
+
+test("translation logs have separate tabs and file conversations are grouped by job", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  await page.route("**/api/bootstrap", async (route) => {
+    const response = await route.fetch();
+    const data = await response.json();
+    data.settings.loggingEnabled = true;
+    await route.fulfill({ json: data });
+  });
+  const conversation = { timestamp: "1700000000000", operation: "translation", provider: "Test", model: "Test", durationMs: 1, success: true, response: "Translation" };
+  await page.route("**/api/logs?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    const items = kind === "text" ? [{ ...conversation, id: "text", request: "Text request" }] : kind === "file" ? [
+      { ...conversation, id: "retry", jobId: "job-1", filename: "same.md", request: "Retry request" },
+      { ...conversation, id: "second", jobId: "job-2", filename: "same.md", request: "Second job request" },
+      { ...conversation, id: "first", jobId: "job-1", filename: "same.md", request: "First request" },
+    ] : [];
+    await route.fulfill({ json: { items, page: 1, pageSize: 20, total: kind === "file" ? 2 : items.length, totalPages: 1 } });
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Logs", exact: true }).click();
+  await page.getByRole("tab", { name: "Text translation logs" }).click();
+  await expect(page.getByText("Text request", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "File translation logs" }).click();
+  await expect(page.locator(".file-log-group")).toHaveCount(2);
+  const first = page.locator(".file-log-group").filter({ hasText: "job-1" });
+  await first.locator("summary").click();
+  await expect(first.locator(".conversation-row")).toHaveCount(2);
+  await expect(first).toContainText("Retry request");
+  await expect(first).toContainText("First request");
+  await expect(page.getByText("Text request", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".pagination")).toContainText("2 jobs");
+});
+
 for (const viewport of [
   { name: "desktop", width: 1440, height: 900 },
   { name: "mobile", width: 390, height: 844 },

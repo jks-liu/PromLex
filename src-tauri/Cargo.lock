@@ -2139,6 +2139,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "markup5ever_rcdom"
+version = "0.38.0+unofficial"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "333171ccdf66e915257740d44e38ea5b1b19ce7b45d33cc35cb6f118fbd981ff"
+dependencies = [
+ "html5ever",
+ "markup5ever",
+ "tendril",
+ "xml5ever",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2863,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "promlex"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2872,11 +2884,14 @@ dependencies = [
  "directories",
  "flate2",
  "fontdb",
+ "html5ever",
  "lopdf",
  "lzma-rust2",
+ "markup5ever_rcdom",
  "mime_guess",
  "parking_lot",
  "printpdf",
+ "pulldown-cmark",
  "quick-xml 0.37.5",
  "reqwest 0.12.28",
  "serde",
@@ -2895,6 +2910,17 @@ dependencies = [
  "unrar",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]
@@ -3737,6 +3763,7 @@ dependencies = [
  "parking_lot",
  "phf_shared",
  "precomputed-hash",
+ "serde",
 ]
 
 [[package]]
@@ -5653,6 +5680,16 @@ checksum = "963d6fab92d5504b971dc8bd90ca743c2575e590bc8071ea5bc571598667ae08"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xml5ever"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3dc9559429edf0cd3f327cc0afd9d6b36fa8cec6d93107b7fbe64f806b5f2d9"
+dependencies = [
+ "log",
+ "markup5ever",
 ]
 
 [[package]]

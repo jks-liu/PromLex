@@ -1,7 +1,9 @@
 mod ai;
 mod archives;
 mod files;
+mod html;
 mod jobs;
+mod markdown;
 mod models;
 mod pdf;
 mod scheduler;
