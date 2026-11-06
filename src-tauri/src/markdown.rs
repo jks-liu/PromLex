@@ -54,6 +54,7 @@ pub fn render(
     blocks: &[Range<usize>],
     translations: &[String],
     bilingual: bool,
+    separator: Option<&str>,
 ) -> String {
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut output = String::new();
@@ -63,7 +64,8 @@ pub fn render(
         let source = &text[block.clone()];
         if bilingual && source.trim() != translated.trim() {
             output.push_str(source);
-            output.push_str(&format!("{newline}{newline}---{newline}{newline}"));
+            let default_separator = format!("{newline}{newline}---{newline}{newline}");
+            output.push_str(separator.unwrap_or(&default_separator));
         }
         output.push_str(translated.trim_end_matches(['\r', '\n']));
         // Ensure a following block cannot become part of a list/table/heading.
@@ -79,6 +81,24 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_separators_preserve_whitespace_and_can_be_empty() {
+        let text = "Hello\n";
+        let blocks = translation_blocks(text);
+        assert_eq!(
+            render(text, &blocks, &["你好".into()], true, Some("\n\n译文：\n")),
+            "Hello\n\n译文：\n你好\n\n"
+        );
+        assert_eq!(
+            render(text, &blocks, &["你好".into()], true, Some("")),
+            "Hello你好\n\n"
+        );
+        assert_eq!(
+            render(text, &blocks, &["你好".into()], false, Some("ignored")),
+            "你好\n"
+        );
+    }
 
     #[test]
     fn semantic_blocks_keep_multiline_paragraphs_lists_quotes_and_tables_whole() {
@@ -103,7 +123,8 @@ mod tests {
                     .iter()
                     .map(|value| value.to_string())
                     .collect::<Vec<_>>(),
-                false
+                false,
+                None
             ),
             text
         );
@@ -121,6 +142,7 @@ mod tests {
                 "| 名称 |\n| --- |\n| 你好 |".into(),
             ],
             true,
+            None,
         );
         assert!(output.contains("- World\n\n---\n\n- 你好\n- 世界\n\n"));
         assert!(output.contains("| Hello |\n\n---\n\n| 名称 |"));
@@ -148,7 +170,7 @@ mod tests {
         let blocks = translation_blocks(text);
         assert_eq!(blocks.len(), 1);
         assert_eq!(&text[blocks[0].clone()], "Hello");
-        let output = render(text, &blocks, &["你好".into()], true);
+        let output = render(text, &blocks, &["你好".into()], true, None);
         assert!(output.starts_with("---\r\ntitle: Hello\r\n---\r\n"));
         assert!(output.contains("Hello\r\n\r\n---\r\n\r\n你好"));
         assert!(output.ends_with("    code here\r\n\r\n[ref]: https://example.com\r\n"));

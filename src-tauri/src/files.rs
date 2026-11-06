@@ -77,12 +77,18 @@ pub struct FileRetryContext {
     bytes: Vec<u8>,
     options: TranslateRequest,
     output_mode: FileOutputMode,
+    bilingual_separator: Option<String>,
     cached_batches: HashMap<usize, CachedBatch>,
     archive_contexts: HashMap<String, FileRetryContext>,
     completed_files: HashMap<String, Vec<u8>>,
 }
 
 impl FileRetryContext {
+    pub(crate) fn with_bilingual_separator(mut self, separator: Option<String>) -> Self {
+        self.bilingual_separator = separator;
+        self
+    }
+
     pub(crate) fn with_completed_files(mut self, files: HashMap<String, Vec<u8>>) -> Self {
         self.completed_files = files;
         self
@@ -99,6 +105,7 @@ impl FileRetryContext {
             bytes,
             options,
             output_mode,
+            bilingual_separator: None,
             cached_batches: HashMap::new(),
             archive_contexts: HashMap::new(),
             completed_files: HashMap::new(),
@@ -116,7 +123,7 @@ struct BatchState {
     cached_batches: HashMap<usize, CachedBatch>,
     failed_batches: Vec<FileBatchFailure>,
     cancel: CancellationToken,
-    bilingual_separator: &'static str,
+    bilingual_separator: String,
 }
 
 impl Default for BatchState {
@@ -125,7 +132,7 @@ impl Default for BatchState {
             cached_batches: HashMap::new(),
             failed_batches: Vec::new(),
             cancel: CancellationToken::new(),
-            bilingual_separator: "\n-----\n",
+            bilingual_separator: "\n-----\n".into(),
         }
     }
 }
@@ -161,6 +168,7 @@ pub async fn retry_file_with_cancel(
         bytes,
         options,
         output_mode,
+        bilingual_separator,
         cached_batches,
         ..
     } = context;
@@ -171,6 +179,7 @@ pub async fn retry_file_with_cancel(
         bytes,
         options,
         output_mode,
+        bilingual_separator,
         progress,
         cached_batches,
         cancel,
@@ -186,6 +195,7 @@ async fn translate_file_with_cache(
     bytes: Vec<u8>,
     mut options: TranslateRequest,
     output_mode: FileOutputMode,
+    bilingual_separator: Option<String>,
     progress: ProgressCallback,
     cached_batches: HashMap<usize, CachedBatch>,
     cancel: CancellationToken,
@@ -201,11 +211,14 @@ async fn translate_file_with_cache(
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    batch_state.bilingual_separator = match extension.as_str() {
-        "csv" | "json" => " | ",
-        "srt" | "vtt" => "\n—\n",
-        _ => "\n-----\n",
-    };
+    batch_state.bilingual_separator = bilingual_separator.clone().unwrap_or_else(|| {
+        match extension.as_str() {
+            "csv" | "json" => " | ",
+            "srt" | "vtt" => "\n—\n",
+            _ => "\n-----\n",
+        }
+        .to_string()
+    });
     let mut counts = Counts {
         stage: "preparing".to_string(),
         ..Counts::default()
@@ -324,7 +337,7 @@ async fn translate_file_with_cache(
                 &markdown_options, FileOutputMode::Translated,
                 &mut counts, &progress, &mut batch_state,
             ).await?;
-            crate::markdown::render(text, &blocks, &translated, output_mode == FileOutputMode::Bilingual).into_bytes()
+            crate::markdown::render(text, &blocks, &translated, output_mode == FileOutputMode::Bilingual, bilingual_separator.as_deref()).into_bytes()
         }
         "html" | "htm" => {
             let text = std::str::from_utf8(&bytes)
@@ -334,7 +347,7 @@ async fn translate_file_with_cache(
                 &options, FileOutputMode::Translated,
                 &mut counts, &progress, &mut batch_state,
             ).await?;
-            crate::html::render(text, &translated, output_mode == FileOutputMode::Bilingual)?
+            crate::html::render(text, &translated, output_mode == FileOutputMode::Bilingual, bilingual_separator.as_deref())?
         }
         "txt" => {
             translate_plain_file(
@@ -393,6 +406,7 @@ async fn translate_file_with_cache(
         bytes: source_bytes,
         options: options.clone(),
         output_mode,
+        bilingual_separator,
         cached_batches: batch_state.cached_batches,
         archive_contexts: HashMap::new(),
         completed_files: HashMap::new(),
@@ -490,6 +504,7 @@ async fn translate_archive(
                         context.options.clone(),
                         context.output_mode,
                     )
+                    .with_bilingual_separator(context.bilingual_separator.clone())
                 });
             let result = Box::pin(retry_file_with_cancel(
                 store,
@@ -2364,7 +2379,7 @@ async fn translate_fragments(
             &fragment.source,
             &translated,
             output_mode,
-            state.bilingual_separator,
+            &state.bilingual_separator,
         ));
     }
     Ok(output)

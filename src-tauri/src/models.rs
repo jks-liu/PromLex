@@ -262,6 +262,8 @@ pub struct TranslateOptions {
     pub summarize: bool,
     #[serde(default)]
     pub output_mode: FileOutputMode,
+    #[serde(default)]
+    pub bilingual_separator: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

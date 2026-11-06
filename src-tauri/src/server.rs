@@ -329,9 +329,11 @@ async fn translate_file(
     let options =
         options.ok_or_else(|| ApiError::bad_request("Translation options are required"))?;
     let output_mode = options.output_mode;
+    let bilingual_separator = options.bilingual_separator.clone();
     let request = options.into_request();
     let retry_context =
         files::FileRetryContext::new(&filename, bytes, request.clone(), output_mode)
+            .with_bilingual_separator(bilingual_separator)
             .with_completed_files(resume_files);
     let status = state
         .jobs

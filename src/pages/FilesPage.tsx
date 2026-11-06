@@ -20,6 +20,7 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
   const defaultProvider = useMemo(() => data.providers.find((provider) => provider.enabled)?.id || "", [data.providers]);
   const [options, setOptions] = useState<TranslationOptionsValue>(() => readOptions(defaultProvider, data.prompts[0]?.id || ""));
   const [outputMode, setOutputMode] = useState<FileOutputMode>(() => readOutputMode());
+  const [separator, setSeparator] = useState(readBilingualSeparator);
   const [summarize, setSummarize] = useState(() => readSummarize());
   const [file, setFile] = useState<File | null>(null);
   const [sourcePath, setSourcePath] = useState("");
@@ -152,6 +153,10 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
   }, [outputMode]);
 
   useEffect(() => {
+    localStorage.setItem("promlex-file-separator", JSON.stringify(separator));
+  }, [separator]);
+
+  useEffect(() => {
     if (!isDesktopApp()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -262,6 +267,7 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
         sourceLanguage: "auto",
         promptId: options.promptId || undefined,
         outputMode,
+        bilingualSeparator: outputMode === "bilingual" && separator.enabled ? separator.value : undefined,
         summarize,
       };
       const job = folderFiles.length > 0
@@ -359,6 +365,17 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
           <span>{t("files.summarize")}</span>
         </label>
       </div>
+      {outputMode === "bilingual" && <div className="file-separator-options">
+        <label className="check-row">
+          <input type="checkbox" checked={separator.enabled} onChange={(event) => setSeparator((current) => ({ ...current, enabled: event.target.checked }))} />
+          <span>{t("files.customSeparator")}</span>
+        </label>
+        {separator.enabled && <label>
+          <span>{t("files.separator")}</span>
+          <textarea rows={3} value={separator.value} onChange={(event) => setSeparator((current) => ({ ...current, value: event.target.value }))} aria-describedby="separator-hint" />
+        </label>}
+        <p id="separator-hint" className="muted">{t("files.separatorHint")}</p>
+      </div>}
       <button
         className={`drop-zone ${file || folderFiles.length ? "has-file" : ""}`}
         type="button"
@@ -463,6 +480,16 @@ export function FilesPage({ data, onReload }: { data: BootstrapData; onReload: (
       </section>
     </section>
   );
+}
+
+function readBilingualSeparator(): { enabled: boolean; value: string } {
+  try {
+    const saved = JSON.parse(localStorage.getItem("promlex-file-separator") || "null");
+    if (saved && typeof saved.enabled === "boolean" && typeof saved.value === "string") return saved;
+  } catch {
+    // Use defaults if the saved preference is unavailable.
+  }
+  return { enabled: false, value: "\n-----\n" };
 }
 
 function progressPercent(job: FileJobStatus) {

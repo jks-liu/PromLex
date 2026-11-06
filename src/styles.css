@@ -107,6 +107,9 @@ textarea { padding: 12px; resize: vertical; line-height: 1.55; }
 .file-result span { color: #527062; font-size: 12px; margin-top: 3px; }
 .file-output-options { display: flex; justify-content: flex-end; flex-wrap: wrap; align-items: end; gap: 12px 18px; margin: -4px 0 16px; }
 .file-summary-toggle { align-self: end; min-height: 36px; }
+.file-separator-options { display: grid; gap: 10px; margin-bottom: 18px; }
+.file-separator-options textarea { width: 100%; resize: vertical; }
+.file-separator-options p { margin: 0; }
 .file-output-options label { width: min(280px, 100%); }
 .file-jobs-section { margin-top: 27px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }

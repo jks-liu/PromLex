@@ -62,6 +62,7 @@ pub fn render(
     text: &str,
     translations: &[String],
     bilingual: bool,
+    separator: Option<&str>,
 ) -> Result<Vec<u8>, std::io::Error> {
     let document = parse(text);
     let mut nodes = Vec::new();
@@ -76,7 +77,12 @@ pub fn render(
         }
         if !bilingual || plain {
             *contents.borrow_mut() = if bilingual {
-                format!("{} | {}", source.trim_end(), translated.trim_start())
+                format!(
+                    "{}{}{}",
+                    source.trim_end(),
+                    separator.unwrap_or(" | "),
+                    translated.trim_start()
+                )
             } else {
                 translated.clone()
             }
@@ -86,13 +92,18 @@ pub fn render(
         if let Some(parent) = node.parent.take().and_then(|parent| parent.upgrade()) {
             let mut children = parent.children.borrow_mut();
             if let Some(index) = children.iter().position(|child| Rc::ptr_eq(child, &node)) {
-                let replacements = vec![
-                    text_node(&source),
-                    line_break(),
-                    text_node("─────"),
-                    line_break(),
-                    text_node(translated),
-                ];
+                let mut replacements = vec![text_node(&source)];
+                if let Some(separator) = separator {
+                    for (index, line) in separator.replace("\r\n", "\n").split('\n').enumerate() {
+                        if index > 0 {
+                            replacements.push(line_break());
+                        }
+                        replacements.push(text_node(line));
+                    }
+                } else {
+                    replacements.extend([line_break(), text_node("─────"), line_break()]);
+                }
+                replacements.push(text_node(translated));
                 for child in &replacements {
                     child.parent.set(Some(Rc::downgrade(&parent)));
                 }
@@ -114,11 +125,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_separator_is_escaped_and_line_breaks_are_visible() {
+        let output = render(
+            "<p>Hello</p>",
+            &["你好".into()],
+            true,
+            Some("\n<split>&\n\n"),
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("<p>Hello<br>&lt;split&gt;&amp;<br><br>你好</p>"));
+        let output = render("<p>Hello</p>", &["你好".into()], true, Some("")).unwrap();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("<p>Hello你好</p>"));
+    }
+
+    #[test]
     fn html_preserves_markup_scripts_attributes_and_decodes_entities() {
         let source = "<!doctype html><html><head><style>p { color: red }</style><script>if (a < b) alert('hello')</script></head><body><p title='hello'>Hello &amp; world</p><pre>keep code</pre><table><tr><td>Value</td></tr></table></body></html>";
         assert_eq!(translation_texts(source), ["Hello & world", "Value"]);
         let result = String::from_utf8(
-            render(source, &["你好 & 世界".into(), "数值".into()], true).unwrap(),
+            render(source, &["你好 & 世界".into(), "数值".into()], true, None).unwrap(),
         )
         .unwrap();
         assert!(
@@ -137,6 +165,7 @@ mod tests {
                 source,
                 &["你好".into(), "<bad>你好".into(), "你好".into()],
                 true,
+                None,
             )
             .unwrap(),
         )

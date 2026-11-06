@@ -57,6 +57,21 @@ test("semantic file translation keeps format separators and records the actual j
     expect(received).toContain("Hello\nWorld");
     expect(received).toContain("- Hello\n  - World");
     expect(received.some((text) => text.includes("Hello code"))).toBeFalsy();
+    const separator = "\n<split>&\n\n";
+    for (const fixture of fixtures) {
+      const submitted = await request.post("/api/translate-file", { multipart: {
+        file: { name: fixture.name, mimeType: "text/plain", buffer: Buffer.from(fixture.source) },
+        options: JSON.stringify({ ...options, bilingualSeparator: separator }),
+      } });
+      expect(submitted.ok()).toBeTruthy();
+      const job = await submitted.json();
+      await expect.poll(async () => (await (await request.get(`/api/file-jobs/${job.id}`)).json()).state).toBe("completed");
+      const output = (await (await request.get(`/api/file-jobs/${job.id}/download`)).body()).toString();
+      if (fixture.name.endsWith(".json")) expect(JSON.parse(output).message).toBe(`Hello${separator}你好`);
+      else if (fixture.name.endsWith(".html")) expect(output).toContain("Hello &amp; World<br>&lt;split&gt;&amp;<br><br>你好 &amp; 世界");
+      else if (fixture.name.endsWith(".md")) expect(output).toContain(`# Hello${separator}# 你好`);
+      else expect(output).toContain(`Hello${separator}你好`);
+    }
     expect((await request.post("/api/translate", { data: { ...options, text: "Hello text" } })).ok()).toBeTruthy();
     const textLogs = await (await request.get("/api/logs?kind=text&pageSize=100")).json();
     const textLog = textLogs.items.find((entry: { provider: string }) => entry.provider === "Semantic file test");
@@ -67,6 +82,48 @@ test("semantic file translation keeps format separators and records the actual j
     server.closeAllConnections();
     await new Promise<void>((done) => server.close(() => done()));
   }
+});
+
+test("custom separators accept Enter, persist and are submitted only for bilingual output", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  await page.route("**/api/bootstrap", async (route) => {
+    const response = await route.fetch();
+    const data = await response.json();
+    data.providers = [{ id: "separator-ui", name: "Separator test", model: "test", enabled: true, baseUrl: "http://127.0.0.1:1/v1", apiKey: "", proxyMode: "none", reasoningParser: "auto", supportsImages: false, contextSize: 4096, maxSegments: 1, maxConcurrent: 1, textTranslationModel: false }];
+    await route.fulfill({ json: data });
+  });
+  const submitted: Array<{ outputMode: string; bilingualSeparator?: string }> = [];
+  await page.route("**/api/translate-file", async (route) => {
+    const form = await new Response(new Uint8Array(route.request().postDataBuffer()!), { headers: { "Content-Type": route.request().headers()["content-type"] } }).formData();
+    submitted.push(JSON.parse(String(form.get("options"))));
+    await route.fulfill({ json: { id: "separator-ui", filename: "hello.txt", state: "queued", stage: "queued", outputMode: "bilingual", failedBatches: [], totalSegments: 0, translatedSegments: 0, totalBatches: 0, completedBatches: 0, skippedSegments: 0 } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await page.getByRole("combobox", { name: "Output format", exact: true }).selectOption("bilingual");
+  await page.getByRole("checkbox", { name: "Use a custom separator" }).check();
+  const input = page.getByRole("textbox", { name: "Original / translation separator" });
+  await input.fill("\n译文：");
+  await input.press("End");
+  await input.press("Enter");
+  await input.press("Enter");
+  const separator = "\n译文：\n\n";
+  await expect(input).toHaveValue(separator);
+  await page.reload();
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(input).toHaveValue(separator);
+  const provider = page.getByRole("combobox", { name: "AI provider", exact: true });
+  await provider.selectOption("separator-ui");
+  await page.locator('.files-page input[type="file"]:not([webkitdirectory])').setInputFiles({ name: "hello.txt", mimeType: "text/plain", buffer: Buffer.from("Hello") });
+  await page.getByRole("button", { name: "Translate file", exact: true }).click();
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0].bilingualSeparator).toBe(separator);
+  await page.getByRole("combobox", { name: "Output format", exact: true }).selectOption("translated");
+  await expect(input).toHaveCount(0);
+  await page.locator('.files-page input[type="file"]:not([webkitdirectory])').setInputFiles({ name: "hello.txt", mimeType: "text/plain", buffer: Buffer.from("Hello") });
+  await page.getByRole("button", { name: "Translate file", exact: true }).click();
+  await expect.poll(() => submitted.length).toBe(2);
+  expect(submitted[1].bilingualSeparator).toBeUndefined();
 });
 
 test("folder controls remain usable on narrow screens", async ({ page }) => {

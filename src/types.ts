@@ -161,6 +161,7 @@ export interface FileBatchFailure {
 
 export interface TranslateFileOptions extends Omit<TranslateRequest, "text"> {
   outputMode: FileOutputMode;
+  bilingualSeparator?: string;
 }
 
 export interface SystemLogEntry {
