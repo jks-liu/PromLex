@@ -205,10 +205,12 @@ async fn translate_stream(
                 let _ = stream_sender.send(Ok(Event::default().event("delta").data(data)));
             }
         });
-        match scheduler
-            .translate_with_stream(request.clone(), Priority::High, Some(callback))
-            .await
-        {
+        let result = tokio::select! {
+            biased;
+            _ = sender.closed() => return,
+            result = scheduler.translate_with_stream(request.clone(), Priority::High, Some(callback)) => result,
+        };
+        match result {
             Ok(result) => {
                 if let Err(error) = store.add_history(history_for_text(&request, &result)) {
                     let payload = serde_json::json!({ "error": error.to_string() });
@@ -766,6 +768,8 @@ async fn test_provider(
         text: "Reply with OK only.".to_string(),
         source_language: "English".to_string(),
         target_language: "English".to_string(),
+        secondary_target_language: None,
+        existing_translation: None,
         provider_id: id,
         prompt_id: None,
         additional_prompt: String::new(),

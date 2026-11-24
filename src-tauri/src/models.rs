@@ -188,7 +188,8 @@ pub struct AppData {
     pub ai_conversations: Vec<AiConversationLog>,
 }
 
-pub const DEFAULT_TRANSLATION_PROMPT: &str = "Automatically detect the source language and translate faithfully to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
+pub const DEFAULT_TRANSLATION_PROMPT: &str = "Automatically detect the source language. {{translation_direction}} Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
+const PREVIOUS_TRANSLATION_PROMPT: &str = "Automatically detect the source language and translate faithfully to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
 const LEGACY_TRANSLATION_PROMPT: &str = "Translate faithfully from {{source_language}} to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
 
 fn default_prompts() -> Vec<PromptTemplate> {
@@ -203,7 +204,10 @@ fn default_prompts() -> Vec<PromptTemplate> {
 impl AppData {
     pub(crate) fn upgrade_default_prompt(&mut self) {
         for prompt in &mut self.prompts {
-            if prompt.id == "faithful-translation" && prompt.content == LEGACY_TRANSLATION_PROMPT {
+            if prompt.id == "faithful-translation"
+                && (prompt.content == LEGACY_TRANSLATION_PROMPT
+                    || prompt.content == PREVIOUS_TRANSLATION_PROMPT)
+            {
                 prompt.content = DEFAULT_TRANSLATION_PROMPT.to_string();
             }
         }
@@ -280,6 +284,8 @@ impl TranslateOptions {
             text: String::new(),
             source_language: self.source_language,
             target_language: self.target_language,
+            secondary_target_language: None,
+            existing_translation: None,
             provider_id: self.provider_id,
             prompt_id: self.prompt_id,
             additional_prompt: self.additional_prompt,
@@ -356,6 +362,10 @@ pub struct TranslateRequest {
     pub text: String,
     pub source_language: String,
     pub target_language: String,
+    #[serde(default)]
+    pub secondary_target_language: Option<String>,
+    #[serde(default)]
+    pub existing_translation: Option<String>,
     pub provider_id: String,
     #[serde(default)]
     pub prompt_id: Option<String>,

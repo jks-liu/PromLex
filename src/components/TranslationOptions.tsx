@@ -8,6 +8,7 @@ const LANGUAGES = ["en", "zh-CN", "zh-TW", "ja", "ko", "fr", "de", "es", "ru", "
 export interface TranslationOptionsValue {
   sourceLanguage: string;
   targetLanguage: string;
+  secondaryTargetLanguage?: string;
   providerId: string;
   promptId: string;
   additionalPrompt: string;
@@ -21,9 +22,20 @@ interface TranslationOptionsProps {
   providers: Provider[];
   prompts: PromptTemplate[];
   glossaries: Glossary[];
+  showSecondaryLanguage?: boolean;
 }
 
-export function TranslationOptions({ value, onChange, providers, prompts, glossaries }: TranslationOptionsProps) {
+export function languageLabel(language: string, translate: (key: string) => string) {
+  const normalized = language === "zh" ? "zh-CN" : language;
+  return LANGUAGES.includes(normalized) ? translate(`languages.${normalized}`) : language;
+}
+
+export function languageKey(language: string) {
+  const normalized = language.trim().toLowerCase();
+  return normalized === "zh" ? "zh-cn" : normalized;
+}
+
+export function TranslationOptions({ value, onChange, providers, prompts, glossaries, showSecondaryLanguage }: TranslationOptionsProps) {
   const { t } = useTranslation();
   const instructionsId = useId();
   const helpId = useId();
@@ -37,7 +49,7 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
   };
 
   return (
-    <div className="translation-options">
+    <div className={`translation-options${showSecondaryLanguage ? " with-secondary-language" : ""}`}>
       <div className="target-language-option">
         <LanguageInput
           label={t("translate.targetLanguage")}
@@ -46,6 +58,14 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
         />
         <small className="language-custom-hint">{t("languages.customHint")}</small>
       </div>
+      {showSecondaryLanguage && <div className="target-language-option">
+        <LanguageInput
+          label={t("translate.secondaryTargetLanguage")}
+          value={value.secondaryTargetLanguage || ""}
+          onChange={(secondaryTargetLanguage) => update({ secondaryTargetLanguage })}
+        />
+        <small className="secondary-language-hint">{t("translate.secondaryLanguageHint")}</small>
+      </div>}
       <label>
         <span>{t("translate.provider")}</span>
         <select value={value.providerId} onChange={(event) => update({ providerId: event.target.value })}>
@@ -120,9 +140,7 @@ function LanguageInput({
   const listId = useId();
   const languages = LANGUAGES;
   const selectedLanguage = value === "zh" ? "zh-CN" : value;
-  const displayValue = languages.includes(selectedLanguage)
-    ? t(`languages.${selectedLanguage}`)
-    : value;
+  const displayValue = languageLabel(value, t);
 
   useEffect(() => {
     if (!open) return;

@@ -91,6 +91,8 @@ export interface TranslateRequest {
   text: string;
   sourceLanguage: string;
   targetLanguage: string;
+  secondaryTargetLanguage?: string;
+  existingTranslation?: string;
   providerId: string;
   promptId?: string;
   additionalPrompt: string;

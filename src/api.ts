@@ -141,11 +141,13 @@ export const api = {
 export async function translateStream(
   payload: TranslateRequest,
   onChunk: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<TranslationResult> {
   const response = await fetch(`${apiBase}/api/translate-stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
     body: JSON.stringify(payload),
+    signal,
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null;

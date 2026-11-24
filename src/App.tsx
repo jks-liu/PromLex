@@ -68,7 +68,7 @@ export default function App() {
 
   const pages: Record<View, React.ReactNode> = {
     translate: <TranslatePage data={data} onReload={load} />,
-    files: <FilesPage data={data} onReload={load} />,
+    files: <FilesPage data={data} onReload={load} active={view === "files"} />,
     history: <HistoryPage data={data} onReload={load} />,
     glossaries: <GlossariesPage data={data} onReload={load} />,
     prompts: <PromptsPage data={data} onReload={load} />,

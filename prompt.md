@@ -199,6 +199,14 @@ Translated PDF text cannot fit its original layout at a readable font size (7.7p
 - github ci自动生成的release中，*.AppImage格式比其它格式都大，八十多M，其它格式一般也就十几M，这是为什么？
 - ai交互的log请细分成文本翻译log和文件翻译log，文件翻译log再按照文件job分组
 
+### 2026年11月25日
+
+- 文本翻译添加第二语言，当待翻译文本就是目标语言时翻译到第二翻译语言，并修改相应提示词
+- 文本或文件翻译允许多个tab，tab名默认为目标语言可修改
+- 翻译可以中途取消
+- 文本翻译，添加继续翻译按钮，用户可以修改译文（包括取消后），然后继续翻译
+
+
 ## TODO
 - 取消后再翻译可能有问题
 

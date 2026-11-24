@@ -3,6 +3,133 @@ import { createServer } from "node:http";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+test("text tabs keep their drafts and continue a cancelled stream from the edited prefix", async ({ page, request }) => {
+  const requests: { messages: { role: string; content: string }[] }[] = [];
+  let disconnected = false;
+  const server = createServer((incoming, response) => {
+    let body = "";
+    incoming.on("data", (chunk) => { body += chunk.toString(); });
+    incoming.on("end", () => {
+      requests.push(JSON.parse(body));
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      const chunk = (content: string) => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+      if (requests.length === 1) {
+        response.on("close", () => { disconnected = true; });
+        response.write(chunk("Partial"));
+      } else {
+        response.end(chunk(requests.length === 2 ? " continuation." : "<translation_complete/>") + "data: [DONE]\n\n");
+      }
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No mock address");
+  const providerId = "text-tabs-e2e";
+  try {
+    expect((await request.put("/api/providers", { data: {
+      id: providerId, name: "Text tabs", baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      model: "qwen3", reasoningParser: "qwen3", apiKey: "", proxyMode: "none", enabled: true,
+      supportsImages: false, contextSize: 4096, maxSegments: 1, maxConcurrent: 1, textTranslationModel: false,
+    } })).ok()).toBeTruthy();
+    await page.addInitScript((id) => {
+      localStorage.setItem("tranova-language", "en");
+      localStorage.setItem("tranova-translate-options", JSON.stringify({ providerId: id, targetLanguage: "en", secondaryTargetLanguage: "fr" }));
+    }, providerId);
+    await page.goto("/");
+    const textPage = page.getByRole("region", { name: "Translate text" });
+    const source = textPage.getByRole("textbox", { name: "Source", exact: true });
+    const result = textPage.getByRole("textbox", { name: "Translation", exact: true });
+    await source.fill("Already in English. Another sentence.");
+    await textPage.getByRole("button", { name: "Translate", exact: true }).click();
+    await expect(result).toHaveValue("Partial");
+    expect(requests[0].messages[0].content).toContain("If it is already in en, translate faithfully to fr.");
+
+    await textPage.getByRole("button", { name: "New tab", exact: true }).click();
+    await expect(source).toHaveValue("");
+    const target = textPage.getByRole("combobox", { name: "Target language", exact: true });
+    await target.click();
+    await textPage.getByRole("option", { name: "日本語 ja" }).click();
+    await expect(textPage.getByRole("tab", { name: "日本語" })).toHaveAttribute("aria-selected", "true");
+    await source.fill("Independent draft");
+    await textPage.getByRole("button", { name: "Rename tab" }).click();
+    await textPage.getByRole("textbox", { name: "Tab name" }).fill("Draft two");
+    await textPage.getByRole("button", { name: "Save", exact: true }).click();
+
+    await textPage.getByRole("tab", { name: "English", exact: true }).click();
+    await textPage.getByRole("button", { name: "Cancel translation", exact: true }).click();
+    await expect.poll(() => disconnected).toBe(true);
+    await expect(result).toHaveValue("Partial");
+    await result.fill("Edited prefix");
+    const continueButton = textPage.getByRole("button", { name: "Continue translation", exact: true });
+    await continueButton.click();
+    await expect(result).toHaveValue("Edited prefix continuation.");
+    expect(JSON.parse(requests[1].messages[1].content)).toEqual({
+      source: "Text to translate:\nAlready in English. Another sentence.",
+      existingTranslation: "Edited prefix",
+    });
+    await continueButton.click();
+    await expect.poll(() => requests.length).toBe(3);
+    await expect(continueButton).toBeEnabled();
+    await expect(result).toHaveValue("Edited prefix continuation.");
+    await textPage.getByRole("tab", { name: "Draft two", exact: true }).click();
+    await expect(source).toHaveValue("Independent draft");
+  } finally {
+    await request.delete(`/api/providers/${providerId}`);
+    server.closeAllConnections();
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
+test("file tabs keep separate selections and focus jobs submitted from each tab", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  await page.route("**/api/bootstrap", async (route) => {
+    const data = await (await route.fetch()).json();
+    data.providers = [{
+      id: "file-tabs", name: "File tabs", model: "test", enabled: true, baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "", proxyMode: "none", reasoningParser: "auto", supportsImages: false,
+      contextSize: 4096, maxSegments: 1, maxConcurrent: 1, textTranslationModel: false,
+    }];
+    await route.fulfill({ json: data });
+  });
+  const jobs: { id: string; filename: string; state: string; stage: string; failedBatches: [] }[] = [];
+  await page.route("**/api/file-jobs", (route) => route.fulfill({ json: jobs }));
+  await page.route("**/api/file-jobs/file-2/cancel", (route) => {
+    jobs[1] = { ...jobs[1], state: "cancelled", stage: "cancelled" };
+    return route.fulfill({ json: jobs[1] });
+  });
+  await page.route("**/api/translate-file", async (route) => {
+    const form = await new Response(new Uint8Array(route.request().postDataBuffer()!), {
+      headers: { "Content-Type": route.request().headers()["content-type"] },
+    }).formData();
+    const filename = (form.get("file") as File).name;
+    const job = { id: `file-${jobs.length + 1}`, filename, state: "queued", stage: "queued", failedBatches: [] as [] };
+    jobs.push(job);
+    await route.fulfill({ json: job });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  const files = page.getByRole("region", { name: "Translate files" });
+  const selectFile = (name: string) => files.getByRole("tabpanel").locator("input[type=file]:not([multiple])")
+    .setInputFiles({ name, mimeType: "text/plain", buffer: Buffer.from(name) });
+  await selectFile("first.txt");
+  await files.getByRole("button", { name: "New tab" }).click();
+  await files.getByRole("combobox", { name: "Target language" }).fill("French");
+  await selectFile("second.txt");
+  await files.getByRole("tab", { name: "简体中文" }).click();
+  await expect(files.getByRole("tabpanel").locator(".drop-zone")).toContainText("first.txt");
+  await files.getByRole("button", { name: "Translate file", exact: true }).click();
+  await expect(files.locator(".file-job")).toContainText("first.txt");
+  await files.getByRole("tab", { name: "French" }).click();
+  await expect(files.getByRole("tabpanel").locator(".drop-zone")).toContainText("second.txt");
+  await files.getByRole("button", { name: "Translate file", exact: true }).click();
+  await expect(files.locator(".file-job")).toContainText("second.txt");
+  await expect(files.locator(".file-job")).toHaveCount(1);
+  await files.getByRole("button", { name: "Cancel translation", exact: true }).click();
+  await expect(files.locator(".file-job")).toHaveClass(/cancelled/);
+  await files.getByRole("button", { name: "Close tab" }).click();
+  await expect(files.locator(".file-job")).toHaveCount(2);
+});
+
 test("semantic file translation keeps format separators and records the actual job in AI logs", async ({ request }) => {
   const received: string[] = [];
   const server = createServer((incoming, response) => {

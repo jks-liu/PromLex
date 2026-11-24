@@ -1,129 +1,167 @@
-import { Check, Clipboard, Languages } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { Ban, Check, Clipboard, Languages, Play } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { translateStream } from "../api";
-import { TranslationOptions, type TranslationOptionsValue } from "../components/TranslationOptions";
+import { languageKey, TranslationOptions, type TranslationOptionsValue } from "../components/TranslationOptions";
+import { TranslationTabs, useTranslationTabs } from "../components/TranslationTabs";
 import type { BootstrapData } from "../types";
+
+interface PageProps {
+  data: BootstrapData;
+  onReload: () => Promise<void>;
+}
 
 const MarkdownText = lazy(() => import("../components/MarkdownText"));
 
-export function TranslatePage({ data, onReload }: { data: BootstrapData; onReload: () => Promise<void> }) {
+export function TranslatePage({ data, onReload }: PageProps) {
   const { t } = useTranslation();
-  const defaultProvider = useMemo(() => data.providers.find((provider) => provider.enabled)?.id || "", [data.providers]);
-  const [options, setOptions] = useState<TranslationOptionsValue>(() => readOptions(defaultProvider, data.prompts[0]?.id || ""));
+  const session = useTranslationTabs(data, "text");
+  const [renderMarkdown, setRenderMarkdown] = useState(() => localStorage.getItem("tranova-render-markdown") === "true");
+
+  const changeMarkdown = (enabled: boolean) => {
+    setRenderMarkdown(enabled);
+    localStorage.setItem("tranova-render-markdown", String(enabled));
+  };
+
+  return (
+    <section className="page translate-page" aria-label={t("translate.title")}>
+      <TranslationTabs session={session} />
+      {session.tabs.map((tab, index) => (
+        <div key={tab.id} id={`${tab.id}-panel`} role="tabpanel" aria-labelledby={tab.id} hidden={tab.id !== session.active.id}>
+          <TextTranslation
+            data={data}
+            onReload={onReload}
+            options={tab.options}
+            onOptionsChange={(options) => session.changeOptions(tab.id, options)}
+            renderMarkdown={renderMarkdown}
+            onMarkdownChange={changeMarkdown}
+            autoFocus={index === 0}
+          />
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function TextTranslation({
+  data, onReload, options, onOptionsChange, renderMarkdown, onMarkdownChange, autoFocus,
+}: PageProps & {
+  options: TranslationOptionsValue;
+  onOptionsChange: (options: TranslationOptionsValue) => void;
+  renderMarkdown: boolean;
+  onMarkdownChange: (enabled: boolean) => void;
+  autoFocus: boolean;
+}) {
+  const { t } = useTranslation();
   const [source, setSource] = useState("");
   const [result, setResult] = useState("");
   const [working, setWorking] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const [renderMarkdown, setRenderMarkdown] = useState(() => localStorage.getItem("tranova-render-markdown") === "true");
+  const request = useRef<AbortController>(null);
+  const copyTimer = useRef<number>(undefined);
+  const target = languageKey(options.targetLanguage);
+  const secondary = languageKey(options.secondaryTargetLanguage || "");
+  const sameLanguage = Boolean(target && secondary === target);
+  const canTranslate = Boolean(source.trim() && options.providerId && target && secondary && !sameLanguage);
 
-  useEffect(() => {
-    localStorage.setItem("tranova-render-markdown", String(renderMarkdown));
-  }, [renderMarkdown]);
+  useEffect(() => () => {
+    request.current?.abort();
+    window.clearTimeout(copyTimer.current);
+  }, []);
 
-  useEffect(() => {
-    setOptions((current) => {
-      const providerExists = data.providers.some((provider) => provider.enabled && provider.id === current.providerId);
-      const promptExists = !current.promptId || data.prompts.some((prompt) => prompt.id === current.promptId);
-      const next = {
-        ...current,
-        providerId: providerExists ? current.providerId : defaultProvider,
-        promptId: promptExists ? current.promptId : data.prompts[0]?.id || "",
-      };
-      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
-    });
-  }, [data.providers, data.prompts, defaultProvider]);
-
-  useEffect(() => {
-    localStorage.setItem("tranova-translate-options", JSON.stringify(options));
-  }, [options]);
-
-  const translate = async () => {
-    if (!source.trim() || !options.providerId) return;
+  const translate = async (continueTranslation: boolean) => {
+    if (!canTranslate || request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
     setWorking(true);
+    setCancelled(false);
     setError("");
+    if (!continueTranslation) setResult("");
     try {
-      setResult("");
       const response = await translateStream(
-        { text: source, ...options, sourceLanguage: "auto", promptId: options.promptId || undefined },
-        (text) => setResult(text),
+        {
+          ...options,
+          text: source,
+          sourceLanguage: "auto",
+          promptId: options.promptId || undefined,
+          existingTranslation: continueTranslation ? result : undefined,
+        },
+        (text) => {
+          if (!controller.signal.aborted) setResult(text);
+        },
+        controller.signal,
       );
-      setResult(response.translatedText);
-      await onReload();
+      if (!controller.signal.aborted) {
+        setResult(response.translatedText);
+        void onReload();
+      }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
-      setWorking(false);
+      if (request.current === controller) {
+        request.current = null;
+        setWorking(false);
+      }
     }
+  };
+
+  const cancel = () => {
+    request.current?.abort();
+    request.current = null;
+    setWorking(false);
+    setCancelled(true);
   };
 
   const copy = async () => {
     await navigator.clipboard.writeText(result);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
-  };
-
-  const changeOptions = (next: TranslationOptionsValue) => {
-    setOptions(next);
-    localStorage.setItem("tranova-translate-options", JSON.stringify(next));
+    window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
   };
 
   return (
-    <section className="page translate-page" aria-label={t("translate.title")}>
-      <TranslationOptions value={options} onChange={changeOptions} providers={data.providers} prompts={data.prompts} glossaries={data.glossaries} />
+    <>
+      <TranslationOptions value={options} onChange={onOptionsChange} providers={data.providers} prompts={data.prompts} glossaries={data.glossaries} showSecondaryLanguage />
+      {sameLanguage && <p className="alert error-alert">{t("translate.differentLanguages")}</p>}
       <div className="editor-grid">
         <section className="editor-panel">
           <header className="source-header">
             <strong>{t("translate.source")}</strong>
-            <button className="primary-button source-translate-button" onClick={translate} disabled={working || !source.trim() || !options.providerId}>
-              <Languages size={16} /> {working ? t("translate.working") : t("translate.action")}
-            </button>
+            {working ? (
+              <button className="secondary-button source-translate-button" onClick={cancel}>
+                <Ban size={16} /> {t("files.cancel")}
+              </button>
+            ) : (
+              <button className="primary-button source-translate-button" onClick={() => void translate(false)} disabled={!canTranslate}>
+                <Languages size={16} /> {t("translate.action")}
+              </button>
+            )}
             <span className="source-character-count">{t("translate.characters", { count: source.length })}</span>
           </header>
-          <textarea value={source} onChange={(event) => setSource(event.target.value)} placeholder={t("translate.placeholder")} autoFocus />
+          <textarea aria-label={t("translate.source")} value={source} onChange={(event) => setSource(event.target.value)} placeholder={t("translate.placeholder")} readOnly={working} autoFocus={autoFocus} />
         </section>
         <section className="editor-panel result-panel">
           <header>
             <strong>{t("translate.target")}</strong>
-            <label className="check-row markdown-toggle"><input type="checkbox" checked={renderMarkdown} onChange={(event) => setRenderMarkdown(event.target.checked)} /><span>{t("translate.renderMarkdown")}</span></label>
-            <button className="icon-button" onClick={copy} disabled={!result} title={t("translate.copy")} aria-label={t("translate.copy")}>
+            <button className="secondary-button source-translate-button" onClick={() => void translate(true)} disabled={working || !canTranslate || !result.trim()}>
+              <Play size={15} /> {t("translate.continue")}
+            </button>
+            <label className="check-row markdown-toggle"><input type="checkbox" checked={renderMarkdown} onChange={(event) => onMarkdownChange(event.target.checked)} /><span>{t("translate.renderMarkdown")}</span></label>
+            <button className="icon-button" onClick={() => void copy()} disabled={!result} title={t("translate.copy")} aria-label={t("translate.copy")}>
               {copied ? <Check size={18} /> : <Clipboard size={18} />}
             </button>
           </header>
-          <div className={`translation-result ${!result ? "empty" : ""} ${renderMarkdown && result ? "markdown-body" : ""}`}>
-            {result ? renderMarkdown ? <Suspense fallback={result}><MarkdownText text={result} /></Suspense> : result : t("translate.target")}
-          </div>
+          {renderMarkdown && result ? (
+            <div className="translation-result markdown-body"><Suspense fallback={result}><MarkdownText text={result} /></Suspense></div>
+          ) : (
+            <textarea className="translation-result" aria-label={t("translate.target")} placeholder={t("translate.target")} value={result} onChange={(event) => setResult(event.target.value)} readOnly={working} />
+          )}
         </section>
       </div>
-      {error && <div className="alert error-alert">{error}</div>}
-    </section>
+      {(working || cancelled) && <p className="translation-status muted" role="status">{t(working ? "translate.working" : "translate.cancelled")}</p>}
+      {error && <div className="alert error-alert" role="alert">{error}</div>}
+    </>
   );
-}
-
-function readOptions(defaultProvider: string, defaultPrompt: string): TranslationOptionsValue {
-  const fallback: TranslationOptionsValue = {
-    sourceLanguage: "auto",
-    targetLanguage: "zh-CN",
-    providerId: defaultProvider,
-    promptId: defaultPrompt,
-    additionalPrompt: "",
-    glossaryIds: [],
-    reasoningEffort: "none",
-  };
-  try {
-    const stored = JSON.parse(localStorage.getItem("tranova-translate-options") || "null") as Partial<TranslationOptionsValue> | null;
-    if (!stored || typeof stored !== "object") return fallback;
-    const targetLanguage = stored.targetLanguage === "zh" ? "zh-CN" : stored.targetLanguage;
-    return {
-      ...fallback,
-      ...stored,
-      sourceLanguage: "auto",
-      ...(targetLanguage ? { targetLanguage } : {}),
-      glossaryIds: Array.isArray(stored.glossaryIds) ? stored.glossaryIds : [],
-      reasoningEffort: stored.reasoningEffort === "none" || stored.reasoningEffort === "low" || stored.reasoningEffort === "medium" || stored.reasoningEffort === "high" ? stored.reasoningEffort : "none",
-    };
-  } catch {
-    return fallback;
-  }
 }

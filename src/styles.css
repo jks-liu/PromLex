@@ -46,6 +46,7 @@ h1 { font-size: 26px; line-height: 1.2; margin-bottom: 7px; font-weight: 700; }
 .heading-actions, .action-row, .list-actions, .modal-footer { display: flex; align-items: center; gap: 9px; }
 .action-row { justify-content: flex-end; margin-top: 20px; }
 .translate-page { display: flex; flex-direction: column; min-height: calc(100vh - 114px); }
+.translate-page > [role="tabpanel"]:not([hidden]) { display: flex; flex: 1; flex-direction: column; }
 .translate-page .editor-grid { flex: 1; }
 
 .primary-button, .secondary-button, .icon-text-button, .text-button { border: 1px solid transparent; border-radius: 5px; min-height: 38px; padding: 8px 13px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 600; }
@@ -61,7 +62,18 @@ h1 { font-size: 26px; line-height: 1.2; margin-bottom: 7px; font-weight: 700; }
 .icon-button.danger:hover { background: #fdeae6; color: #b14c3e; }
 .mobile-close { display: none; }
 
+.translation-tab-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; border-bottom: 1px solid #cfd8dc; }
+.translation-tabs { min-width: 0; display: flex; gap: 4px; overflow-x: auto; }
+.translation-tabs button { max-width: 200px; flex: 0 0 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #52636d; padding: 8px 12px; }
+.translation-tabs button[aria-selected="true"] { background: #e8f3ef; border-bottom-color: #1c7c67; color: #176b5a; font-weight: 600; }
+.translation-tabs button:focus-visible { outline-offset: -2px; }
+.translation-tab-actions { display: flex; flex-shrink: 0; gap: 2px; }
+.translation-tab-actions .icon-button { width: 30px; }
+.translation-status { margin-top: 8px; }
 .translation-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1.2fr) minmax(0, .9fr) minmax(0, 1fr); align-items: start; gap: 12px; background: #e8edef; border: 1px solid #d4dde1; padding: 13px; border-radius: 6px; margin-bottom: 16px; }
+@media (min-width: 981px) {
+  .translation-options.with-secondary-language { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
 .additional-prompt { grid-column: 1 / -1; }
 .additional-prompt textarea { min-height: 70px; }
 label span, fieldset legend { display: block; color: #60717b; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
@@ -83,7 +95,7 @@ textarea { padding: 12px; resize: vertical; line-height: 1.55; }
 .language-options button:hover, .language-options button.selected { background: #e8f3ef; color: #176b5a; }
 .language-options span { margin: 0; color: inherit; font-size: 13px; font-weight: 500; }
 .language-options small { color: #809098; font-size: 11px; }
-.language-custom-hint { display: block; margin-top: 5px; color: #708089; font-size: 11px; line-height: 1.35; }
+.language-custom-hint, .secondary-language-hint { display: block; margin-top: 5px; color: #708089; font-size: 11px; line-height: 1.35; }
 .check-row { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: #33454f; font-size: 12px; }
 .check-row input { height: 14px; width: 14px; accent-color: #1c7c67; }
 .check-row span { margin: 0; font-size: 12px; color: inherit; font-weight: 500; }
@@ -96,7 +108,8 @@ textarea { padding: 12px; resize: vertical; line-height: 1.55; }
 .editor-panel header span { color: #7a8991; font-size: 12px; }
 .editor-panel textarea { border: 0; min-height: 342px; border-radius: 0; flex: 1; }
 .translation-result { padding: 13px; white-space: pre-wrap; line-height: 1.6; flex: 1; overflow: auto; }
-.translation-result.empty { color: #93a0a7; }
+.result-panel header { height: auto; min-height: 46px; flex-wrap: wrap; gap: 4px 8px; padding-block: 5px; }
+.result-panel header .icon-button { margin-left: auto; }
 
 .drop-zone { width: 100%; min-height: 230px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 11px; text-align: center; padding: 24px; color: #45616a; background: #fff; border: 1.5px dashed #98abb1; border-radius: 6px; }
 .drop-zone:hover, .drop-zone.has-file { border-color: #1c7c67; background: #f6fbf9; }

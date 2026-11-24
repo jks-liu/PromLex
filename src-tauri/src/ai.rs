@@ -63,6 +63,8 @@ struct ProviderResponse {
     body: String,
 }
 
+const TRANSLATION_COMPLETE: &str = "<translation_complete/>";
+
 pub async fn translate(
     store: &AppStore,
     request: &TranslateRequest,
@@ -74,7 +76,16 @@ pub async fn translate(
     validate_languages(request)?;
     let data = store.snapshot();
     let provider = enabled_provider(&data, &request.provider_id)?;
-    let translated_text = translate_with_data_instruction(
+    let prefix = request.existing_translation.as_deref().unwrap_or_default();
+    let stream = stream.map(|callback| {
+        let prefix = prefix.to_string();
+        Arc::new(move |text: String| {
+            if prefix.is_empty() || !TRANSLATION_COMPLETE.starts_with(text.trim()) {
+                callback(format!("{prefix}{text}"));
+            }
+        }) as StreamCallback
+    });
+    let translated = translate_with_data_instruction(
         store,
         &data,
         &provider,
@@ -84,8 +95,13 @@ pub async fn translate(
         "translation",
     )
     .await?;
+    let suffix = if !prefix.is_empty() && translated.trim() == TRANSLATION_COMPLETE {
+        ""
+    } else {
+        &translated
+    };
     Ok(TranslationResult {
-        translated_text,
+        translated_text: format!("{prefix}{suffix}"),
         provider: provider.name,
         model: provider.model,
     })
@@ -350,7 +366,40 @@ fn validate_languages(request: &TranslateRequest) -> Result<(), AiError> {
             "Source and target languages are required".to_string(),
         ));
     }
+    if secondary_language(request).is_some_and(|secondary| {
+        let normalize = |language: &str| {
+            let language = language.trim().to_lowercase();
+            if language == "zh" {
+                "zh-cn".to_string()
+            } else {
+                language
+            }
+        };
+        normalize(&request.target_language) == normalize(secondary)
+    }) {
+        return Err(AiError::Message(
+            "The secondary language must differ from the target language".to_string(),
+        ));
+    }
     Ok(())
+}
+
+fn secondary_language(request: &TranslateRequest) -> Option<&str> {
+    request
+        .secondary_target_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn translation_direction(request: &TranslateRequest) -> String {
+    let target = request.target_language.trim();
+    match secondary_language(request) {
+        Some(secondary) => format!(
+            "Detect the language of the source text. If it is already in {target}, translate faithfully to {secondary}. Otherwise, translate faithfully to {target}."
+        ),
+        None => format!("Translate faithfully to {target}."),
+    }
 }
 
 fn enabled_provider(data: &AppData, id: &str) -> Result<Provider, AiError> {
@@ -374,7 +423,17 @@ async fn translate_with_data_instruction(
     stream: Option<StreamCallback>,
     operation: &str,
 ) -> Result<String, AiError> {
-    let (mut system, user) = build_messages(data, request);
+    let (mut system, mut user) = build_messages(data, request);
+    let existing = request
+        .existing_translation
+        .as_deref()
+        .filter(|text| !text.is_empty());
+    if let Some(prefix) = existing {
+        system.push_str(&format!(
+            "\n\nThe user message is a JSON object containing the source and an existing translation prefix. Detect the source language from the source alone. Use the existing translation as a fixed prefix and identify the portion of the source it already covers, even if the prefix was edited or ends mid-sentence. Translate only the remaining portion in the same output language and style. Return only the suffix, including any spaces or line breaks needed to join it to the existing translation. If the source is already fully translated, return exactly {TRANSLATION_COMPLETE}."
+        ));
+        user = json!({ "source": user, "existingTranslation": prefix }).to_string();
+    }
     if let Some(instruction) = extra_system_instruction {
         system.push_str("\n\n");
         system.push_str(instruction);
@@ -393,8 +452,7 @@ async fn translate_with_data_instruction(
     let duration_ms = started.elapsed().as_millis() as u64;
     match response {
         Ok(response) => {
-            let response = response.trim().to_string();
-            if response.is_empty() {
+            if response.trim().is_empty() {
                 let error =
                     AiError::Message("The AI provider returned an empty response".to_string());
                 record_ai_log(
@@ -408,6 +466,11 @@ async fn translate_with_data_instruction(
                 );
                 return Err(error);
             }
+            let response = if existing.is_some() {
+                response
+            } else {
+                response.trim().to_string()
+            };
             record_ai_log(
                 store,
                 provider,
@@ -462,7 +525,9 @@ fn record_ai_log<E: std::fmt::Display>(
 }
 
 fn append_language_description(prompt: &mut String, request: &TranslateRequest) {
-    if request.source_language.trim() == "火星文" || request.target_language.trim() == "火星文"
+    if request.source_language.trim() == "火星文"
+        || request.target_language.trim() == "火星文"
+        || secondary_language(request) == Some("火星文")
     {
         prompt.push_str("\n\n");
         prompt.push_str(MARTIAN_LANGUAGE_DESCRIPTION);
@@ -470,11 +535,17 @@ fn append_language_description(prompt: &mut String, request: &TranslateRequest) 
 }
 
 fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String) {
+    let direction = translation_direction(request);
     if request.prompt_id.as_deref().is_none_or(str::is_empty) {
-        return (
-            request.additional_prompt.trim().to_string(),
-            request.text.clone(),
-        );
+        let mut system = request.additional_prompt.trim().to_string();
+        if secondary_language(request).is_some() {
+            if !system.is_empty() {
+                system.push_str("\n\n");
+            }
+            system.push_str(&direction);
+            append_language_description(&mut system, request);
+        }
+        return (system, request.text.clone());
     }
     let glossary = data
         .glossaries
@@ -506,6 +577,7 @@ fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String
                 },
             )
             .replace("{{target_language}}", &request.target_language)
+            .replace("{{translation_direction}}", &direction)
             .replace(
                 "{{glossary}}",
                 if glossary.is_empty() {
@@ -526,6 +598,10 @@ fn build_messages(data: &AppData, request: &TranslateRequest) -> (String, String
     if !request.additional_prompt.trim().is_empty() {
         system.push_str("\n\nAdditional instructions:\n");
         system.push_str(request.additional_prompt.trim());
+    }
+    if secondary_language(request).is_some() && !template.contains("{{translation_direction}}") {
+        system.push_str("\n\n");
+        system.push_str(&direction);
     }
     if let Some(summary) = request
         .context_summary
@@ -691,7 +767,7 @@ async fn call_chat_completions(
 
 fn strip_reasoning_markup(content: &str) -> String {
     if let Some((_, answer)) = content.rsplit_once("</think>") {
-        answer.trim_start().to_string()
+        answer.to_string()
     } else if content.contains("<think>") {
         String::new()
     } else {
@@ -1441,6 +1517,8 @@ mod tests {
             text: "original".to_string(),
             source_language: "English".to_string(),
             target_language: "Chinese".to_string(),
+            secondary_target_language: None,
+            existing_translation: None,
             provider_id: "provider".to_string(),
             prompt_id: None,
             additional_prompt: String::new(),
@@ -1463,6 +1541,8 @@ mod tests {
             text: "Hello".to_string(),
             source_language: "English".to_string(),
             target_language: "Chinese".to_string(),
+            secondary_target_language: None,
+            existing_translation: None,
             provider_id: "provider".to_string(),
             prompt_id: Some("faithful-translation".to_string()),
             additional_prompt: "Use a friendly tone.".to_string(),
@@ -1485,6 +1565,8 @@ mod tests {
             text: "Hello".into(),
             source_language: "English".into(),
             target_language: "Martian".into(),
+            secondary_target_language: None,
+            existing_translation: None,
             provider_id: "provider".into(),
             prompt_id: None,
             additional_prompt: "My instructions".into(),
