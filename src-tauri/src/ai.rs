@@ -396,7 +396,7 @@ fn translation_direction(request: &TranslateRequest) -> String {
     let target = request.target_language.trim();
     match secondary_language(request) {
         Some(secondary) => format!(
-            "Detect the language of the source text. If it is already in {target}, translate faithfully to {secondary}. Otherwise, translate faithfully to {target}."
+            "Translate faithfully to {target}. If it is already in {target}, translate to {secondary}."
         ),
         None => format!("Translate faithfully to {target}."),
     }
