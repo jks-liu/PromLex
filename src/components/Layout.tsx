@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
-import { Bot, Bug, FileText, History, Languages, Library, Menu, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, X } from "lucide-react";
+import { Bot, Bug, FileText, History, Info, Languages, Library, Menu, PanelLeftClose, PanelLeftOpen, Settings, Sparkles, X } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-export type View = "translate" | "files" | "history" | "glossaries" | "prompts" | "providers" | "settings" | "logs";
+export type View = "translate" | "files" | "history" | "glossaries" | "prompts" | "providers" | "settings" | "logs" | "about";
 
 interface LayoutProps {
   view: View;
@@ -11,9 +11,10 @@ interface LayoutProps {
   children: ReactNode;
   connected: boolean;
   showLogs: boolean;
+  version: string;
 }
 
-export function Layout({ view, onViewChange, children, connected, showLogs }: LayoutProps) {
+export function Layout({ view, onViewChange, children, connected, showLogs, version }: LayoutProps) {
   const { t } = useTranslation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("promlex-sidebar-collapsed") === "true");
@@ -32,6 +33,7 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
     { id: "providers", icon: Bot, label: t("nav.providers") },
     { id: "settings", icon: Settings, label: t("nav.settings") },
     ...(showLogs ? [{ id: "logs" as View, icon: Bug, label: t("nav.logs") }] : []),
+    { id: "about", icon: Info, label: t("nav.about") },
   ];
 
   const select = (next: View) => {
@@ -64,9 +66,12 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
             </button>
           ))}
         </nav>
-        <div className="connection-state" title={connected ? t("common.ready") : t("common.error")}>
-          <span className={connected ? "status-dot online" : "status-dot"} />
-          <span className="connection-label">{connected ? t("common.ready") : t("common.error")}</span>
+        <div className="sidebar-footer">
+          <span className="connection-state" title={connected ? t("common.ready") : t("common.error")}>
+            <span className={connected ? "status-dot online" : "status-dot"} />
+            <span className="connection-label">{connected ? t("common.ready") : t("common.error")}</span>
+          </span>
+          <span className="sidebar-version" title={`${t("settings.version")} v${version}`}>v{version}</span>
         </div>
       </aside>
       {mobileOpen && <div className="mobile-overlay" onClick={() => setMobileOpen(false)} />}
@@ -76,7 +81,7 @@ export function Layout({ view, onViewChange, children, connected, showLogs }: La
           <strong>{t("common.productName")}</strong>
           <span className={connected ? "status-dot online" : "status-dot"} />
         </header>
-        <main>{children}</main>
+        <main className={view === "translate" || view === "files" ? "translation-main" : undefined}>{children}</main>
       </div>
     </div>
   );

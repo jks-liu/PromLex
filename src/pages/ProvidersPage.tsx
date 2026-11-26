@@ -2,6 +2,7 @@ import { Bot, CheckCircle2, Pencil, Plus, Search, Trash2, Wifi } from "lucide-re
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
+import { ConfigurationTransfer } from "../components/ConfigurationTransfer";
 import { Modal } from "../components/Modal";
 import type { BootstrapData, Provider, ProviderModel } from "../types";
 
@@ -94,7 +95,10 @@ export function ProvidersPage({ data, onReload }: { data: BootstrapData; onReloa
     <section className="page">
       <div className="page-heading">
         <div><h1>{t("provider.title")}</h1><p>{t("provider.subtitle")}</p></div>
-        <button className="primary-button" onClick={() => { setModels([]); setError(""); setEditing(blankProvider()); }}><Plus size={18} /> {t("provider.new")}</button>
+        <div className="heading-actions provider-heading-actions">
+          <ConfigurationTransfer data={data} scope="providers" onImported={onReload} />
+          <button className="primary-button" onClick={() => { setModels([]); setError(""); setEditing(blankProvider()); }}><Plus size={18} /> {t("provider.new")}</button>
+        </div>
       </div>
       {error && <div className="alert error-alert">{error}</div>}
       {testMessage && <div className="alert success-alert"><CheckCircle2 size={18} /> {testMessage}</div>}

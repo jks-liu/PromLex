@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, initializeApi } from "./api";
 import { Layout, type View } from "./components/Layout";
+import { AboutPage } from "./pages/AboutPage";
 import { FilesPage } from "./pages/FilesPage";
 import { GlossariesPage } from "./pages/GlossariesPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -75,9 +76,10 @@ export default function App() {
     providers: <ProvidersPage data={data} onReload={load} />,
     settings: <SettingsPage data={data} onReload={load} />,
     logs: <LogsPage data={data} />,
+    about: view === "about" ? <AboutPage version={data.version} /> : null,
   };
 
-  return <Layout view={view} onViewChange={setView} connected={true} showLogs={data.settings.loggingEnabled}>
+  return <Layout view={view} onViewChange={setView} connected={true} showLogs={data.settings.loggingEnabled} version={data.version}>
     {(Object.keys(pages) as View[]).map((page) => <div hidden={view !== page} key={page}>{pages[page]}</div>)}
   </Layout>;
 }

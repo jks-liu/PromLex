@@ -2,6 +2,7 @@ import { FolderOpen, Globe2, Save } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, isDesktopApp } from "../api";
+import { ConfigurationTransfer } from "../components/ConfigurationTransfer";
 import type { AppSettings, BootstrapData, DownloadLocation } from "../types";
 
 export function SettingsPage({ data, onReload }: { data: BootstrapData; onReload: () => Promise<void> }) {
@@ -10,15 +11,18 @@ export function SettingsPage({ data, onReload }: { data: BootstrapData; onReload
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  const applySettings = async (saved: AppSettings) => {
+    setSettings(saved);
+    localStorage.setItem("tranova-language", saved.language);
+    await i18n.changeLanguage(saved.language);
+    await onReload();
+  };
+
   const save = async () => {
     setMessage(""); setError("");
     try {
-      const saved = await api.saveSettings(settings);
-      setSettings(saved);
-      localStorage.setItem("tranova-language", saved.language);
-      await i18n.changeLanguage(saved.language);
+      await applySettings(await api.saveSettings(settings));
       setMessage(t("status.saved"));
-      await onReload();
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
 
@@ -37,7 +41,14 @@ export function SettingsPage({ data, onReload }: { data: BootstrapData; onReload
 
   return (
     <section className="page settings-page">
-      <div className="page-heading"><div><h1>{t("settings.title")}</h1><p>{t("settings.subtitle")}</p></div></div>
+      <div className="page-heading">
+        <div><h1>{t("settings.title")}</h1><p>{t("settings.subtitle")}</p></div>
+        <ConfigurationTransfer data={data} scope="configuration" onImported={(imported) => {
+          setError("");
+          setMessage("");
+          return applySettings(imported.settings);
+        }} />
+      </div>
       {message && <div className="alert success-alert">{message}</div>}
       {error && <div className="alert error-alert">{error}</div>}
       <div className="settings-section">
@@ -67,7 +78,6 @@ export function SettingsPage({ data, onReload }: { data: BootstrapData; onReload
         <label className="setting-row"><div><strong>{t("settings.logging")}</strong><span>{t("settings.loggingHint")}</span></div><span className="setting-toggle"><input type="checkbox" checked={settings.loggingEnabled} onChange={(event) => setSettings({ ...settings, loggingEnabled: event.target.checked })} aria-label={t("settings.logging")} /></span></label>
         <label className="setting-row"><div><strong>{t("settings.logLevel")}</strong><span>{t("settings.logLevelHint")}</span></div><select value={settings.logLevel} onChange={(event) => setSettings({ ...settings, logLevel: event.target.value as AppSettings["logLevel"] })}><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select></label>
       </div>
-      <div className="settings-version">{t("settings.version")}: v{data.version}</div>
       <div className="action-row"><button className="primary-button" onClick={save}><Save size={18} /> {t("common.save")}</button></div>
     </section>
   );

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 test("sidebar collapse persists and navigation stays accessible on desktop and mobile", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
@@ -130,14 +131,98 @@ test("translation controls share a row and explain template use", async ({ page 
   const glossary = await options.getByRole("group", { name: "Glossaries", exact: true }).boundingBox();
   expect(Math.abs(prompt!.y - reasoning!.y)).toBeLessThan(2);
   expect(Math.abs(prompt!.y - glossary!.y)).toBeLessThan(25);
-  await expect(options.getByRole("textbox", { name: "Translation instructions" })).toBeVisible();
+  const instructions = options.getByRole("textbox", { name: "Translation instructions" });
+  await expect(instructions).toBeHidden();
+  await options.getByText("Translation instructions", { exact: true }).click();
+  await expect(instructions).toBeVisible();
+  await instructions.fill("Keep the original formatting.");
   await options.getByText("How to use templates", { exact: true }).click();
   await expect(options.locator(".template-help-content")).toContainText("{{target_language}}");
   await expect(options.locator(".template-help-content")).toContainText("{{text}}");
   await expect(options.locator(".template-help-content")).toContainText("appended to the selected template");
+  await options.getByText("Translation instructions", { exact: true }).click();
+  await expect(instructions).toBeHidden();
+  await options.getByText("Translation instructions", { exact: true }).click();
+  await expect(instructions).toHaveValue("Keep the original formatting.");
   await page.getByRole("button", { name: "Files", exact: true }).click();
   await expect(page.locator(".files-page .page-heading")).toHaveCount(0);
   await expect(page.locator(".files-page").getByRole("combobox", { name: "Source language" })).toHaveCount(0);
+});
+
+test("wide windows give the editors the full available workspace", async ({ page }) => {
+  await page.setViewportSize({ width: 2300, height: 900 });
+  await page.goto("/");
+  const grid = await page.locator(".editor-grid").boundingBox();
+  const column = await page.locator(".main-column").boundingBox();
+  expect(grid!.width).toBeGreaterThan(column!.width - 40);
+  expect(grid!.height).toBeGreaterThan(650);
+});
+
+test("About shows the installed version, GitHub links and update status", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+  let checks = 0;
+  await page.route("**/api/release", (route) => {
+    checks += 1;
+    return route.fulfill({ json: { latestVersion: "9.10.0", updateAvailable: checks === 1 } });
+  });
+  await page.goto("/");
+  const version = await page.locator(".sidebar-version").textContent();
+  expect(version).toMatch(/^v\d+\.\d+\.\d+/);
+  expect(checks).toBe(0);
+  await page.getByRole("button", { name: "About", exact: true }).click();
+  const about = page.getByRole("region", { name: "About", exact: true });
+  await expect(about).toContainText(version!);
+  await expect(about).toContainText("Copyright © LIU Jinchen");
+  await expect(about.getByRole("link", { name: "Project homepage on GitHub" })).toHaveAttribute("href", "https://github.com/jks-liu/PromLex");
+  await expect(about.getByRole("link", { name: "GitHub releases" })).toHaveAttribute("href", "https://github.com/jks-liu/PromLex/releases");
+  await expect(about.getByRole("status")).toHaveText("Version v9.10.0 is available");
+  await about.getByRole("button", { name: "Check for updates" }).click();
+  await expect(about.getByRole("status")).toHaveText("You’re up to date");
+});
+
+test("configuration and provider backups round-trip with optional API keys", async ({ page, request }) => {
+  const original = await (await request.get("/api/bootstrap")).json();
+  const provider = { id: "backup-test", name: "Backup provider", model: "test", baseUrl: "http://127.0.0.1:1/v1", apiKey: "example-key" };
+  const upload = (name: string, data: unknown) => page.getByLabel(name, { exact: true }).setInputFiles({
+    name: "backup.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(data)),
+  });
+  const exportJson = async (name: string, includeKeys = false) => {
+    await page.getByRole("button", { name, exact: true }).click();
+    const dialog = page.getByRole("dialog", { name, exact: true });
+    const keys = dialog.getByRole("checkbox", { name: "Include API keys in plain text" });
+    await expect(keys).not.toBeChecked();
+    if (includeKeys) await keys.check();
+    const download = page.waitForEvent("download");
+    await dialog.getByRole("button", { name: "Export", exact: true }).click();
+    return JSON.parse(await readFile((await (await download).path())!, "utf8"));
+  };
+  try {
+    await page.addInitScript(() => localStorage.setItem("tranova-language", "en"));
+    await page.goto("/");
+    await page.getByRole("button", { name: "AI providers", exact: true }).click();
+    await upload("Import AI providers", [provider]);
+    await expect(page.locator(".provider-item").getByText("Backup provider", { exact: true })).toBeVisible();
+    expect((await exportJson("Export AI providers")).providers.find((item: { id: string }) => item.id === provider.id)).not.toHaveProperty("apiKey");
+    expect((await exportJson("Export AI providers", true)).providers.find((item: { id: string }) => item.id === provider.id).apiKey).toBe(provider.apiKey);
+
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const configuration = await exportJson("Export configuration");
+    expect(Object.keys(configuration).sort()).toEqual(["glossaries", "prompts", "providers", "settings"]);
+    configuration.settings.aiTimeoutSeconds = 93;
+    const invalid = await request.post("/api/import/configuration", {
+      data: { ...configuration, providers: [...configuration.providers, { ...provider, id: "invalid-backup-test", baseUrl: "invalid" }] },
+    });
+    expect(invalid.status()).toBe(400);
+    expect((await (await request.get("/api/bootstrap")).json()).settings.aiTimeoutSeconds).toBe(original.settings.aiTimeoutSeconds);
+    await upload("Import configuration", configuration);
+    await expect(page.getByRole("status")).toHaveText("Import complete");
+    const restored = await (await request.get("/api/bootstrap")).json();
+    expect(restored.settings.aiTimeoutSeconds).toBe(93);
+    expect(restored.providers.find((item: { id: string }) => item.id === provider.id).apiKey).toBe(provider.apiKey);
+  } finally {
+    await request.put("/api/settings", { data: original.settings });
+    await request.delete(`/api/providers/${provider.id}`);
+  }
 });
 
 

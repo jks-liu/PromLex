@@ -8,6 +8,7 @@ import type {
   PromptTemplate,
   Provider,
   ProviderModel,
+  ReleaseCheck,
   LogKind,
   LogPage,
   SystemLogEntry,
@@ -62,6 +63,7 @@ function appendResumeInput(form: FormData, resume?: FileResumeInput) {
 
 export const api = {
   bootstrap: () => request<BootstrapData>("/bootstrap"),
+  checkRelease: (signal?: AbortSignal) => request<ReleaseCheck>("/release", { signal }),
   history: () => request<HistoryEntry[]>("/history"),
   logs: <K extends LogKind>(kind: K, page = 1, pageSize = 20) =>
     request<LogPage<K extends "system" ? SystemLogEntry : AiConversationLog>>(`/logs?kind=${kind}&page=${page}&pageSize=${pageSize}`),
@@ -124,7 +126,7 @@ export const api = {
   deletePrompt: (id: string) => request<void>(`/prompts/${id}`, { method: "DELETE" }),
   saveSettings: (settings: AppSettings) =>
     request<AppSettings>("/settings", { method: "PUT", body: JSON.stringify(settings) }),
-  importData: (kind: "glossaries" | "prompts", data: unknown) =>
+  importData: (kind: "glossaries" | "prompts" | "providers" | "configuration", data: unknown) =>
     request<BootstrapData>(`/import/${kind}`, { method: "POST", body: JSON.stringify(data) }),
   deleteHistory: (id: string) => request<void>(`/history/${encodeURIComponent(id)}`, { method: "DELETE" }),
   clearHistory: () => request<void>("/history", { method: "DELETE" }),
@@ -135,6 +137,10 @@ export const api = {
   openPath: async (path: string) => {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<void>("open_path", { path });
+  },
+  openProjectPage: async (releases: boolean) => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<void>("open_project_page", { releases });
   },
 };
 

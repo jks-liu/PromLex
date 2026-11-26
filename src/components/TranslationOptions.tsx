@@ -100,9 +100,9 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
           ))}
         </div>
       </fieldset>
-      <div className="additional-prompt">
+      <details className="additional-prompt">
+        <summary>{t("translate.additionalPrompt")}</summary>
         <div className="instructions-heading">
-          <label htmlFor={instructionsId}>{t("translate.additionalPrompt")}</label>
           <details className="template-help">
             <summary>{t("translate.templateHelp")}</summary>
             <div className="template-help-content" id={helpId}>
@@ -114,12 +114,13 @@ export function TranslationOptions({ value, onChange, providers, prompts, glossa
         </div>
         <textarea
           id={instructionsId}
+          aria-label={t("translate.additionalPrompt")}
           aria-describedby={helpId}
           value={value.additionalPrompt}
           onChange={(event) => update({ additionalPrompt: event.target.value })}
           placeholder={t("translate.additionalPromptPlaceholder")}
         />
-      </div>
+      </details>
     </div>
   );
 }

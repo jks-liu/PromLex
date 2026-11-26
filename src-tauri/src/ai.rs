@@ -77,14 +77,21 @@ pub async fn translate(
     let data = store.snapshot();
     let provider = enabled_provider(&data, &request.provider_id)?;
     let prefix = request.existing_translation.as_deref().unwrap_or_default();
-    let stream = stream.map(|callback| {
-        let prefix = prefix.to_string();
-        Arc::new(move |text: String| {
-            if prefix.is_empty() || !TRANSLATION_COMPLETE.starts_with(text.trim()) {
-                callback(format!("{prefix}{text}"));
-            }
-        }) as StreamCallback
-    });
+    let stream = if prefix.is_empty() {
+        stream
+    } else {
+        stream.map(|callback| {
+            let prefix = prefix.to_string();
+            Arc::new(move |text: String| {
+                let candidate = text.trim_start();
+                if !prefix.trim_start().starts_with(candidate)
+                    && !TRANSLATION_COMPLETE.starts_with(candidate.trim_end())
+                {
+                    callback(format!("{prefix}{}", continuation_suffix(&prefix, &text)));
+                }
+            }) as StreamCallback
+        })
+    };
     let translated = translate_with_data_instruction(
         store,
         &data,
@@ -95,16 +102,26 @@ pub async fn translate(
         "translation",
     )
     .await?;
-    let suffix = if !prefix.is_empty() && translated.trim() == TRANSLATION_COMPLETE {
-        ""
-    } else {
+    let suffix = if prefix.is_empty() {
         &translated
+    } else {
+        continuation_suffix(prefix, &translated)
     };
     Ok(TranslationResult {
         translated_text: format!("{prefix}{suffix}"),
         provider: provider.name,
         model: provider.model,
     })
+}
+
+fn continuation_suffix<'a>(prefix: &str, reply: &'a str) -> &'a str {
+    if reply.trim().is_empty() || reply.trim() == TRANSLATION_COMPLETE {
+        return "";
+    }
+    reply
+        .trim_start()
+        .strip_prefix(prefix.trim_start())
+        .unwrap_or(reply)
 }
 
 pub async fn translate_batch(
@@ -430,9 +447,9 @@ async fn translate_with_data_instruction(
         .filter(|text| !text.is_empty());
     if let Some(prefix) = existing {
         system.push_str(&format!(
-            "\n\nThe user message is a JSON object containing the source and an existing translation prefix. Detect the source language from the source alone. Use the existing translation as a fixed prefix and identify the portion of the source it already covers, even if the prefix was edited or ends mid-sentence. Translate only the remaining portion in the same output language and style. Return only the suffix, including any spaces or line breaks needed to join it to the existing translation. If the source is already fully translated, return exactly {TRANSLATION_COMPLETE}."
+            "\n\nContinue the translation using the two fields in the user message. The source field contains the full original text and determines the translation direction. The existingTranslation field contains the user's current draft. Match the draft to the part of the source it covers by meaning. The draft may have been edited, may end mid-sentence, or may predate new text added to the source. Keep the draft exactly as provided. Output only the missing continuation, including any spaces or line breaks needed to join it directly to the draft. If all of the source is already covered, output exactly {TRANSLATION_COMPLETE}."
         ));
-        user = json!({ "source": user, "existingTranslation": prefix }).to_string();
+        user = json!({ "source": request.text, "existingTranslation": prefix }).to_string();
     }
     if let Some(instruction) = extra_system_instruction {
         system.push_str("\n\n");
@@ -452,7 +469,7 @@ async fn translate_with_data_instruction(
     let duration_ms = started.elapsed().as_millis() as u64;
     match response {
         Ok(response) => {
-            if response.trim().is_empty() {
+            if response.trim().is_empty() && existing.is_none() {
                 let error =
                     AiError::Message("The AI provider returned an empty response".to_string());
                 record_ai_log(
@@ -818,7 +835,8 @@ async fn send_chat_completions_request(
     for attempt in 1..=MAX_REQUEST_ATTEMPTS {
         match send_attempt(client, endpoint, body, api_key).await {
             Ok(response) if response.status().is_success() => {
-                return read_chat_completions_stream(response, stream).await;
+                return read_text_stream(response, stream, append_chat_completion_stream_line)
+                    .await;
             }
             Ok(response) => {
                 let status = response.status();
@@ -863,7 +881,7 @@ async fn send_responses_request(
     for attempt in 1..=MAX_REQUEST_ATTEMPTS {
         match send_attempt(client, endpoint, body, api_key).await {
             Ok(response) if response.status().is_success() => {
-                return read_responses_stream(response, stream).await;
+                return read_text_stream(response, stream, append_response_stream_line).await;
             }
             Ok(response) => {
                 let status = response.status();
@@ -950,95 +968,54 @@ async fn send_attempt(
     call.send().await
 }
 
-async fn read_responses_stream(
+async fn read_text_stream(
     mut response: reqwest::Response,
     stream: Option<StreamCallback>,
+    append: impl Fn(&[u8], &mut String, Option<&StreamCallback>) -> Result<bool, AiError>,
 ) -> Result<String, AiError> {
+    let json_response = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    if json_response {
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| request_error("reading provider response", error))?;
+        let mut content = String::new();
+        let complete = append(&body, &mut content, stream.as_ref())?;
+        return finish_text_stream(content, complete);
+    }
     let mut pending = Vec::new();
-    let mut raw = Vec::new();
     let mut content = String::new();
-    let mut parse_error = None;
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|error| request_error("reading streaming provider response", error))?
     {
-        raw.extend_from_slice(&chunk);
         pending.extend_from_slice(&chunk);
-        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-            let line = pending.drain(..=newline).collect::<Vec<_>>();
-            if let Err(error) = append_response_stream_line(&line, &mut content, stream.as_ref()) {
-                parse_error.get_or_insert(error);
+        let mut lines = pending.split_inclusive(|byte| *byte == b'\n');
+        let mut consumed = 0;
+        for line in &mut lines {
+            if !line.ends_with(b"\n") {
+                break;
             }
-        }
-    }
-    if !pending.is_empty() {
-        if let Err(error) = append_response_stream_line(&pending, &mut content, stream.as_ref()) {
-            parse_error.get_or_insert(error);
-        }
-    }
-    if content.is_empty() {
-        if let Ok(body) = std::str::from_utf8(&raw) {
-            if let Ok(value) = serde_json::from_str::<Value>(body) {
-                append_response_value(&value, &mut content, stream.as_ref());
+            if append(line, &mut content, stream.as_ref())? {
+                return Ok(content);
             }
+            consumed += line.len();
         }
+        pending.drain(..consumed);
     }
-    if let Some(error) = parse_error {
-        return Err(error);
-    }
-    if content.is_empty() {
-        return Err(AiError::Message(
-            "Responses API returned no output text".to_string(),
-        ));
-    }
-    Ok(content)
+    let complete = !pending.is_empty() && append(&pending, &mut content, stream.as_ref())?;
+    finish_text_stream(content, complete)
 }
 
-async fn read_chat_completions_stream(
-    mut response: reqwest::Response,
-    stream: Option<StreamCallback>,
-) -> Result<String, AiError> {
-    let mut pending = Vec::new();
-    let mut raw = Vec::new();
-    let mut content = String::new();
-    let mut parse_error = None;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| request_error("reading streaming provider response", error))?
-    {
-        raw.extend_from_slice(&chunk);
-        pending.extend_from_slice(&chunk);
-        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-            let line = pending.drain(..=newline).collect::<Vec<_>>();
-            if let Err(error) =
-                append_chat_completion_stream_line(&line, &mut content, stream.as_ref())
-            {
-                parse_error.get_or_insert(error);
-            }
-        }
-    }
-    if !pending.is_empty() {
-        if let Err(error) =
-            append_chat_completion_stream_line(&pending, &mut content, stream.as_ref())
-        {
-            parse_error.get_or_insert(error);
-        }
-    }
-    if content.is_empty() {
-        if let Ok(body) = std::str::from_utf8(&raw) {
-            if let Ok(value) = serde_json::from_str::<Value>(body) {
-                append_chat_completion_value(&value, &mut content, stream.as_ref());
-            }
-        }
-    }
-    if let Some(error) = parse_error {
-        return Err(error);
-    }
-    if content.is_empty() {
+fn finish_text_stream(content: String, complete: bool) -> Result<String, AiError> {
+    if !complete && content.is_empty() {
         return Err(AiError::Message(
-            "Chat Completions API returned no output text".to_string(),
+            "The AI provider ended the stream without a result".to_string(),
         ));
     }
     Ok(content)
@@ -1048,7 +1025,7 @@ fn append_chat_completion_stream_line(
     line: &[u8],
     content: &mut String,
     stream: Option<&StreamCallback>,
-) -> Result<(), AiError> {
+) -> Result<bool, AiError> {
     let line = std::str::from_utf8(line)
         .map_err(|error| {
             AiError::Message(format!(
@@ -1057,11 +1034,14 @@ fn append_chat_completion_stream_line(
         })?
         .trim();
     if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
-        return Ok(());
+        return Ok(false);
     }
     let payload = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
-    if payload == "[DONE]" || payload.is_empty() {
-        return Ok(());
+    if payload == "[DONE]" {
+        return Ok(true);
+    }
+    if payload.is_empty() {
+        return Ok(false);
     }
     let value: Value = serde_json::from_str(payload).map_err(|error| {
         AiError::Message(format!(
@@ -1077,7 +1057,10 @@ fn append_chat_completion_stream_line(
         return Err(AiError::Message(message.to_string()));
     }
     append_chat_completion_value(&value, content, stream);
-    Ok(())
+    Ok(value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        == Some("stop"))
 }
 
 fn append_chat_completion_value(
@@ -1122,18 +1105,21 @@ fn append_response_stream_line(
     line: &[u8],
     content: &mut String,
     stream: Option<&StreamCallback>,
-) -> Result<(), AiError> {
+) -> Result<bool, AiError> {
     let line = std::str::from_utf8(line)
         .map_err(|error| {
             AiError::Message(format!("Responses API returned invalid UTF-8: {error}"))
         })?
         .trim();
     if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
-        return Ok(());
+        return Ok(false);
     }
     let payload = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
-    if payload == "[DONE]" || payload.is_empty() {
-        return Ok(());
+    if payload == "[DONE]" {
+        return Ok(true);
+    }
+    if payload.is_empty() {
+        return Ok(false);
     }
     let value: Value = serde_json::from_str(payload).map_err(|error| {
         AiError::Message(format!(
@@ -1149,7 +1135,10 @@ fn append_response_stream_line(
         return Err(AiError::Message(message.to_string()));
     }
     append_response_value(&value, content, stream);
-    Ok(())
+    Ok(matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("response.completed" | "response.incomplete")
+    ) || value.get("status").and_then(Value::as_str) == Some("completed"))
 }
 
 fn append_response_value(value: &Value, content: &mut String, stream: Option<&StreamCallback>) {
@@ -1269,7 +1258,7 @@ fn parse_batch_response(response: &str, expected: usize) -> Result<Vec<String>, 
     Ok(parts.into_iter().map(str::to_string).collect())
 }
 
-fn build_client(
+pub(crate) fn build_client(
     proxy_mode: ProxyMode,
     proxy_url: &str,
     timeout_seconds: u64,

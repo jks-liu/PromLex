@@ -15,7 +15,7 @@ mod store;
 #[path = "../build_support.rs"]
 mod build_support;
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{ffi::OsStr, fs, path::PathBuf, process::Command};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use jobs::FileJobManager;
@@ -128,28 +128,31 @@ fn open_path(path: String) -> Result<(), String> {
     if !path.exists() {
         return Err("The requested path does not exist".to_string());
     }
+    open_with_system(path.as_os_str())
+}
+
+#[tauri::command]
+fn open_project_page(releases: bool) -> Result<(), String> {
+    let url = if releases {
+        "https://github.com/jks-liu/PromLex/releases"
+    } else {
+        "https://github.com/jks-liu/PromLex"
+    };
+    open_with_system(OsStr::new(url))
+}
+
+fn open_with_system(destination: &OsStr) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("explorer.exe");
-        command.arg(&path);
-        command
-    };
+    let program = "explorer.exe";
     #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(&path);
-        command
-    };
+    let program = "open";
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut command = Command::new("xdg-open");
-        command.arg(&path);
-        command
-    };
-    command
+    let program = "xdg-open";
+    Command::new(program)
+        .arg(destination)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("Unable to open path: {error}"))
+        .map_err(|error| format!("Unable to open destination: {error}"))
 }
 
 pub fn run() {
@@ -177,7 +180,8 @@ pub fn run() {
             save_file_job,
             set_file_job_output,
             read_output_directory,
-            open_path
+            open_path,
+            open_project_page
         ])
         .setup(move |app| {
             let asset_dir = web_asset_dir(app.handle());

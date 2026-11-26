@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 test("text tabs keep their drafts and continue a cancelled stream from the edited prefix", async ({ page, request }) => {
   const requests: { messages: { role: string; content: string }[] }[] = [];
   let disconnected = false;
+  let continuationDisconnected = false;
   const server = createServer((incoming, response) => {
     let body = "";
     incoming.on("data", (chunk) => { body += chunk.toString(); });
@@ -16,8 +17,11 @@ test("text tabs keep their drafts and continue a cancelled stream from the edite
       if (requests.length === 1) {
         response.on("close", () => { disconnected = true; });
         response.write(chunk("Partial"));
+      } else if (requests.length === 2) {
+        response.on("close", () => { continuationDisconnected = true; });
+        response.write(chunk("Edited") + chunk(" prefix continuation.") + "data: [DONE]\n\n");
       } else {
-        response.end(chunk(requests.length === 2 ? " continuation." : "<translation_complete/>") + "data: [DONE]\n\n");
+        response.end("data: [DONE]\n\n");
       }
     });
   });
@@ -42,7 +46,7 @@ test("text tabs keep their drafts and continue a cancelled stream from the edite
     await source.fill("Already in English. Another sentence.");
     await textPage.getByRole("button", { name: "Translate", exact: true }).click();
     await expect(result).toHaveValue("Partial");
-    expect(requests[0].messages[0].content).toContain("If it is already in en, translate faithfully to fr.");
+    expect(requests[0].messages[0].content).toContain("If it is already in en, translate to fr.");
 
     await textPage.getByRole("button", { name: "New tab", exact: true }).click();
     await expect(source).toHaveValue("");
@@ -60,17 +64,20 @@ test("text tabs keep their drafts and continue a cancelled stream from the edite
     await expect.poll(() => disconnected).toBe(true);
     await expect(result).toHaveValue("Partial");
     await result.fill("Edited prefix");
+    await source.fill("Already in English. Another sentence. Added later.");
     const continueButton = textPage.getByRole("button", { name: "Continue translation", exact: true });
     await continueButton.click();
     await expect(result).toHaveValue("Edited prefix continuation.");
+    await expect.poll(() => continuationDisconnected).toBe(true);
     expect(JSON.parse(requests[1].messages[1].content)).toEqual({
-      source: "Text to translate:\nAlready in English. Another sentence.",
+      source: "Already in English. Another sentence. Added later.",
       existingTranslation: "Edited prefix",
     });
     await continueButton.click();
     await expect.poll(() => requests.length).toBe(3);
     await expect(continueButton).toBeEnabled();
     await expect(result).toHaveValue("Edited prefix continuation.");
+    await expect(textPage.getByRole("alert")).toHaveCount(0);
     await textPage.getByRole("tab", { name: "Draft two", exact: true }).click();
     await expect(source).toHaveValue("Independent draft");
   } finally {

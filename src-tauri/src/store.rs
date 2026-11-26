@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -8,8 +9,8 @@ use directories::ProjectDirs;
 use parking_lot::RwLock;
 
 use crate::models::{
-    AiConversationLog, AppData, AppSettings, Glossary, HistoryEntry, PromptTemplate, Provider,
-    SystemLogEntry,
+    AiConversationLog, AppData, AppSettings, ConfigurationImport, Glossary, HistoryEntry,
+    PromptTemplate, Provider, SystemLogEntry,
 };
 
 #[derive(Clone)]
@@ -314,40 +315,49 @@ impl AppStore {
         self.persist()
     }
 
-    pub fn save_settings(&self, mut settings: AppSettings) -> Result<AppSettings, io::Error> {
-        settings.language = match settings.language.as_str() {
-            "zh-CN" => "zh-CN".to_string(),
-            _ => "en".to_string(),
-        };
-        settings.web_host = match settings.web_host.trim() {
-            "localhost" => "127.0.0.1".to_string(),
-            value => value.to_string(),
-        };
-        let host = settings.web_host.parse::<std::net::IpAddr>().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Web access must use a loopback IP address",
-            )
-        })?;
-        if !host.is_loopback() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Web access is limited to this device for security; use 127.0.0.1 or ::1",
-            ));
-        }
-        if settings.web_port < 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Web port must be between 1024 and 65535",
-            ));
-        }
-        settings.ai_timeout_seconds = settings.ai_timeout_seconds.clamp(10, 3_600);
-        settings.log_level = normalize_log_level(&settings.log_level);
-        settings.custom_download_directory = settings.custom_download_directory.trim().to_string();
-        settings.last_download_directory = settings.last_download_directory.trim().to_string();
+    pub fn save_settings(&self, settings: AppSettings) -> Result<AppSettings, io::Error> {
+        let settings = validate_settings(settings)?;
         self.inner.data.write().settings = settings.clone();
         self.persist()?;
         Ok(settings)
+    }
+
+    pub fn import_configuration(&self, backup: ConfigurationImport) -> Result<(), io::Error> {
+        let settings = validate_settings(backup.settings)?;
+        let providers = validated_providers(backup.providers)?;
+        let mut data = self.inner.data.write();
+        let mut next = data.clone();
+        next.settings = settings;
+        merge_providers(&mut next.providers, providers);
+        merge_glossaries(&mut next.glossaries, backup.glossaries);
+        merge_prompts(&mut next.prompts, backup.prompts);
+        next.upgrade_default_prompt();
+        self.write_data(&next)?;
+        *data = next;
+        Ok(())
+    }
+
+    pub fn import_providers(&self, providers: Vec<Provider>) -> Result<(), io::Error> {
+        let providers = validated_providers(providers)?;
+        let mut data = self.inner.data.write();
+        let mut next = data.clone();
+        merge_providers(&mut next.providers, providers);
+        self.write_data(&next)?;
+        *data = next;
+        Ok(())
+    }
+
+    fn write_data(&self, data: &AppData) -> Result<(), io::Error> {
+        let directory = self
+            .inner
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::other("Missing data directory"))?;
+        let mut file = tempfile::NamedTempFile::new_in(directory)?;
+        serde_json::to_writer_pretty(&mut file, data).map_err(io::Error::other)?;
+        file.flush()?;
+        file.persist(&self.inner.path)?;
+        Ok(())
     }
 
     pub fn set_last_download_directory(&self, directory: &Path) -> Result<(), io::Error> {
@@ -363,35 +373,89 @@ impl AppStore {
     }
 
     pub fn replace_glossaries(&self, glossaries: Vec<Glossary>) -> Result<(), io::Error> {
-        let mut data = self.inner.data.write();
-        for glossary in glossaries {
-            if !glossary.id.trim().is_empty() && !glossary.name.trim().is_empty() {
-                upsert(&mut data.glossaries, glossary, |value| &value.id);
-            }
-        }
-        drop(data);
+        merge_glossaries(&mut self.inner.data.write().glossaries, glossaries);
         self.persist()
     }
 
     pub fn replace_prompts(&self, prompts: Vec<PromptTemplate>) -> Result<(), io::Error> {
-        let mut data = self.inner.data.write();
-        for prompt in prompts {
-            if !prompt.id.trim().is_empty()
-                && !prompt.name.trim().is_empty()
-                && !prompt.content.trim().is_empty()
-            {
-                upsert(&mut data.prompts, prompt, |value| &value.id);
-            }
-        }
-        drop(data);
+        merge_prompts(&mut self.inner.data.write().prompts, prompts);
         self.persist()
     }
 
     fn persist(&self) -> Result<(), io::Error> {
-        let content = serde_json::to_vec_pretty(&*self.inner.data.read())
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        fs::write(&self.inner.path, content)
+        self.write_data(&self.inner.data.read())
     }
+}
+
+fn validated_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, io::Error> {
+    providers.into_iter().map(validate_provider).collect()
+}
+
+fn merge_providers(current: &mut Vec<Provider>, providers: Vec<Provider>) {
+    for mut provider in providers {
+        if provider.api_key.is_empty() {
+            if let Some(saved) = current
+                .iter()
+                .find(|item| item.id == provider.id && item.base_url == provider.base_url)
+            {
+                provider.api_key.clone_from(&saved.api_key);
+            }
+        }
+        upsert(current, provider, |value| &value.id);
+    }
+}
+
+fn merge_glossaries(current: &mut Vec<Glossary>, glossaries: Vec<Glossary>) {
+    for glossary in glossaries {
+        if !glossary.id.trim().is_empty() && !glossary.name.trim().is_empty() {
+            upsert(current, glossary, |value| &value.id);
+        }
+    }
+}
+
+fn merge_prompts(current: &mut Vec<PromptTemplate>, prompts: Vec<PromptTemplate>) {
+    for prompt in prompts {
+        if !prompt.id.trim().is_empty()
+            && !prompt.name.trim().is_empty()
+            && !prompt.content.trim().is_empty()
+        {
+            upsert(current, prompt, |value| &value.id);
+        }
+    }
+}
+
+fn validate_settings(mut settings: AppSettings) -> Result<AppSettings, io::Error> {
+    settings.language = match settings.language.as_str() {
+        "zh-CN" => "zh-CN".to_string(),
+        _ => "en".to_string(),
+    };
+    settings.web_host = match settings.web_host.trim() {
+        "localhost" => "127.0.0.1".to_string(),
+        value => value.to_string(),
+    };
+    let host = settings.web_host.parse::<std::net::IpAddr>().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Web access must use a loopback IP address",
+        )
+    })?;
+    if !host.is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Web access is limited to this device for security; use 127.0.0.1 or ::1",
+        ));
+    }
+    if settings.web_port < 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Web port must be between 1024 and 65535",
+        ));
+    }
+    settings.ai_timeout_seconds = settings.ai_timeout_seconds.clamp(10, 3_600);
+    settings.log_level = normalize_log_level(&settings.log_level);
+    settings.custom_download_directory = settings.custom_download_directory.trim().to_string();
+    settings.last_download_directory = settings.last_download_directory.trim().to_string();
+    Ok(settings)
 }
 
 fn validate_provider(mut provider: Provider) -> Result<Provider, io::Error> {

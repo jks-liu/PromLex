@@ -188,6 +188,15 @@ pub struct AppData {
     pub ai_conversations: Vec<AiConversationLog>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigurationImport {
+    pub settings: AppSettings,
+    pub providers: Vec<Provider>,
+    pub glossaries: Vec<Glossary>,
+    pub prompts: Vec<PromptTemplate>,
+}
+
 pub const DEFAULT_TRANSLATION_PROMPT: &str = "Automatically detect the source language. {{translation_direction}} Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
 const PREVIOUS_TRANSLATION_PROMPT: &str = "Automatically detect the source language and translate faithfully to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";
 const LEGACY_TRANSLATION_PROMPT: &str = "Translate faithfully from {{source_language}} to {{target_language}}. Preserve the original meaning, tone, formatting, markup and line breaks. Use the terminology below when relevant. Return only the translated text.\n\n{{glossary}}";

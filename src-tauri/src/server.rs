@@ -22,8 +22,9 @@ use crate::{
     ai, files,
     jobs::FileJobManager,
     models::{
-        AppData, AppSettings, FileJobStatus, Glossary, HistoryEntry, LogsData, PromptTemplate,
-        Provider, ProviderModel, ProxyMode, TranslateOptions, TranslateRequest, TranslationResult,
+        AppData, AppSettings, ConfigurationImport, FileJobStatus, Glossary, HistoryEntry, LogsData,
+        PromptTemplate, Provider, ProviderModel, ProxyMode, TranslateOptions, TranslateRequest,
+        TranslationResult,
     },
     scheduler::{AiScheduler, Priority},
     store::AppStore,
@@ -71,6 +72,18 @@ struct ModelDiscoveryRequest {
 #[derive(Serialize)]
 struct MessageResponse {
     message: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReleaseCheck {
+    latest_version: Option<String>,
+    update_available: bool,
 }
 
 pub async fn start_server(
@@ -132,6 +145,7 @@ fn api_router(state: ServerState) -> Router {
         .route("/api/logs/{kind}", delete(clear_logs))
         .route("/api/logs/{kind}/{id}", delete(delete_log))
         .route("/api/import/{kind}", post(import_data))
+        .route("/api/release", get(check_release))
         .layer(DefaultBodyLimit::max(151 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(
@@ -146,6 +160,64 @@ fn api_router(state: ServerState) -> Router {
 async fn health() -> Json<MessageResponse> {
     Json(MessageResponse {
         message: "ok".to_string(),
+    })
+}
+
+async fn check_release(State(state): State<ApiState>) -> Result<Json<ReleaseCheck>, ApiError> {
+    let settings = state.store.settings();
+    let proxy_mode = if settings.proxy_url.trim().is_empty() {
+        ProxyMode::System
+    } else {
+        ProxyMode::Settings
+    };
+    let client =
+        ai::build_client(proxy_mode, &settings.proxy_url, 10).map_err(ApiError::from_ai)?;
+    let response = client
+        .get("https://api.github.com/repos/jks-liu/PromLex/releases/latest")
+        .header(
+            header::USER_AGENT,
+            concat!("PromLex/", env!("CARGO_PKG_VERSION")),
+        )
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(Json(ReleaseCheck {
+            latest_version: None,
+            update_available: false,
+        }));
+    }
+    let release: GitHubRelease = response
+        .error_for_status()
+        .map_err(ApiError::bad_gateway)?
+        .json()
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    release_status(&release.tag_name, env!("CARGO_PKG_VERSION")).map(Json)
+}
+
+fn release_status(tag: &str, installed: &str) -> Result<ReleaseCheck, ApiError> {
+    let latest = tag.rsplit('/').next().unwrap_or(tag);
+    let latest = latest.strip_prefix('v').unwrap_or(latest);
+    let (current, prerelease) = installed.split_once('-').unwrap_or((installed, ""));
+    let version_parts = |version: &str| {
+        let mut parts = version.split('.');
+        let numbers = [
+            parts.next()?.parse::<u64>().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ];
+        parts.next().is_none().then_some(numbers)
+    };
+    let latest_parts = version_parts(latest)
+        .ok_or_else(|| ApiError::bad_gateway("Unrecognized GitHub release version"))?;
+    let current_parts = version_parts(current)
+        .ok_or_else(|| ApiError::internal("Unrecognized installed version"))?;
+    Ok(ReleaseCheck {
+        latest_version: Some(latest.to_string()),
+        update_available: latest_parts > current_parts
+            || (latest_parts == current_parts && !prerelease.is_empty()),
     })
 }
 
@@ -883,32 +955,21 @@ async fn import_data(
             .store
             .replace_prompts(read_import(body, "prompts")?)
             .map_err(ApiError::from_io)?,
+        "providers" => state
+            .store
+            .import_providers(read_import(body, "providers")?)
+            .map_err(ApiError::from_io)?,
+        "configuration" => {
+            let backup: ConfigurationImport =
+                serde_json::from_value(body).map_err(ApiError::bad_request)?;
+            state
+                .store
+                .import_configuration(backup)
+                .map_err(ApiError::from_io)?;
+        }
         _ => return Err(ApiError::bad_request("Unknown import type")),
     }
-    let AppData {
-        providers,
-        glossaries,
-        prompts,
-        settings,
-        history,
-        ..
-    } = state.store.snapshot();
-    Ok(Json(BootstrapResponse {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        providers,
-        glossaries,
-        prompts,
-        settings,
-        history,
-        logs: {
-            let (system, conversations) = state.store.logs();
-            LogsData {
-                system,
-                conversations,
-            }
-        },
-        server_url: state.server_url,
-    }))
+    Ok(bootstrap(State(state)).await)
 }
 
 fn read_import<T: serde::de::DeserializeOwned>(
@@ -965,6 +1026,9 @@ impl ApiError {
         }
     }
     fn from_ai(error: ai::AiError) -> Self {
+        Self::bad_gateway(error)
+    }
+    fn bad_gateway(error: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),
@@ -979,5 +1043,36 @@ impl IntoResponse for ApiError {
             Json(serde_json::json!({ "error": self.message })),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_status;
+
+    #[test]
+    fn release_tags_are_compared_numerically() {
+        let status = release_status("releases/v1.10.0", "1.9.9").ok().unwrap();
+        assert_eq!(status.latest_version.as_deref(), Some("1.10.0"));
+        assert!(status.update_available);
+        assert!(
+            !release_status("v1.0.7", "1.0.7")
+                .ok()
+                .unwrap()
+                .update_available
+        );
+        assert!(
+            !release_status("release/v0.1.8", "1.0.7")
+                .ok()
+                .unwrap()
+                .update_available
+        );
+        assert!(
+            release_status("v1.0.7", "1.0.7-rc.1")
+                .ok()
+                .unwrap()
+                .update_available
+        );
+        assert!(release_status("v1.0", "1.0.7").is_err());
     }
 }

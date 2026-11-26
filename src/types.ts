@@ -74,6 +74,11 @@ export interface BootstrapData {
   serverUrl: string;
 }
 
+export interface ReleaseCheck {
+  latestVersion: string | null;
+  updateAvailable: boolean;
+}
+
 export interface HistoryEntry {
   id: string;
   kind: "text" | "file" | string;
